@@ -1,0 +1,1337 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GYM PRO — Cloud Management</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+    <style>
+        :root {
+            --transition: 0.3s ease;
+            --font: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --radius: 14px;
+            --radius-sm: 10px;
+            --sidebar-w: 240px;
+        }
+        [data-theme="dark"] {
+            --bg: #0c0a09; --bg-elevated: #1c1917; --card: #1c1917; --border: #292524;
+            --text: #fafaf9; --text-muted: #a8a29e; --primary: #f97316; --primary-hover: #ea580c;
+            --primary-soft: rgba(249,115,22,0.15); --accent: #fb923c; --success: #22c55e;
+            --danger: #ef4444; --warning: #eab308; --shadow: 0 8px 30px rgba(0,0,0,0.45);
+            --input-bg: #0c0a09; --sidebar-bg: #141210;
+        }
+        [data-theme="light"] {
+            --bg: #fff7ed; --bg-elevated: #fff; --card: #fff; --border: #fed7aa;
+            --text: #1c1917; --text-muted: #78716c; --primary: #ea580c; --primary-hover: #c2410c;
+            --primary-soft: rgba(234,88,12,0.12); --accent: #f97316; --success: #16a34a;
+            --danger: #dc2626; --warning: #ca8a04; --shadow: 0 8px 30px rgba(234,88,12,0.08);
+            --input-bg: #fff7ed; --sidebar-bg: #ffedd5;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: var(--font); }
+        body { background: var(--bg); color: var(--text); min-height: 100vh; transition: background var(--transition), color var(--transition); }
+
+        #auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .auth-card { width: 100%; max-width: 400px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; box-shadow: var(--shadow); text-align: center; }
+        .auth-card h2 { font-size: 1.5rem; margin-bottom: 8px; }
+        .auth-card p { color: var(--text-muted); margin-bottom: 24px; font-size: 0.95rem; }
+        .divider { margin: 20px 0; border-top: 1px solid var(--border); position: relative; }
+        .divider span { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--card); padding: 0 12px; color: var(--text-muted); font-size: 0.75rem; font-weight: 600; }
+        .demo-btns { display: flex; flex-direction: column; gap: 10px; }
+
+        #app-shell { display: none; min-height: 100vh; }
+        .topbar { height: 56px; background: var(--card); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; position: sticky; top: 0; z-index: 50; }
+        .logo { font-size: 1.2rem; font-weight: 800; color: var(--primary); display: flex; align-items: center; gap: 10px; }
+        .logo-mark { width: 30px; height: 30px; background: linear-gradient(135deg, var(--primary), var(--accent)); border-radius: 8px; display: grid; place-items: center; color: #fff; font-weight: 900; font-size: 0.9rem; }
+        .topbar-right { display: flex; align-items: center; gap: 12px; }
+        .role-badge { background: var(--primary); color: #fff; padding: 3px 10px; border-radius: 999px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
+        .theme-btn { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: 0.85rem; font-weight: 500; }
+        .theme-btn:hover { border-color: var(--primary); color: var(--primary); }
+
+        .layout { display: flex; min-height: calc(100vh - 56px); }
+        .sidebar { width: var(--sidebar-w); background: var(--sidebar-bg); border-right: 1px solid var(--border); padding: 20px 12px; flex-shrink: 0; position: sticky; top: 56px; height: calc(100vh - 56px); overflow-y: auto; }
+        .sidebar-section { margin-bottom: 20px; }
+        .sidebar-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); padding: 0 12px; margin-bottom: 8px; }
+        .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; font-size: 0.9rem; font-weight: 500; transition: all var(--transition); border: none; background: none; width: 100%; text-align: left; }
+        .nav-item:hover { background: var(--primary-soft); color: var(--primary); }
+        .nav-item.active { background: var(--primary); color: #fff; }
+        .nav-item .nav-icon { width: 20px; text-align: center; font-size: 1rem; }
+
+        .content { flex: 1; padding: 24px; overflow-x: hidden; max-width: 1100px; }
+        .page { display: none; }
+        .page.active { display: block; }
+        .page-title { font-size: 1.4rem; font-weight: 800; margin-bottom: 6px; }
+        .page-desc { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 22px; }
+
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); margin-bottom: 20px; }
+        .card-title { font-size: 1rem; font-weight: 700; color: var(--primary); margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .grid-2 { grid-template-columns: repeat(2, 1fr); }
+        @media (max-width: 800px) { .grid-2 { grid-template-columns: 1fr; } .sidebar { width: 200px; } }
+
+        .btn { padding: 10px 16px; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 0.9rem; transition: all var(--transition); }
+        .btn-primary { background: var(--primary); color: #fff; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-danger { background: var(--danger); color: #fff; }
+        .btn-warning { background: var(--warning); color: #1c1917; }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+        .btn-outline:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+        .btn-sm { padding: 6px 12px; font-size: 0.8rem; }
+        .btn-block { width: 100%; }
+
+        .form-group { margin-bottom: 12px; }
+        .form-group label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; font-weight: 500; }
+        .form-control { width: 100%; padding: 10px 12px; background: var(--input-bg); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); outline: none; font-size: 0.95rem; }
+        .form-control:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+
+        .table-wrap { overflow-x: auto; border-radius: var(--radius-sm); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { padding: 11px 12px; border-bottom: 1px solid var(--border); text-align: left; }
+        th { background: var(--bg); color: var(--text-muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+        tr:hover td { background: var(--primary-soft); }
+
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 18px; }
+        .stat-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; text-align: center; }
+        .stat-value { font-size: 1.55rem; font-weight: 800; color: var(--primary); }
+        .stat-label { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
+        .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+        .search-box { flex: 1; min-width: 160px; position: relative; }
+        .search-box input { padding-left: 34px; }
+        .search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 0.9rem; pointer-events: none; }
+        .pagination { display: flex; gap: 5px; align-items: center; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+        .page-btn { min-width: 34px; height: 34px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600; font-size: 0.85rem; }
+        .page-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+        .page-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .page-info { font-size: 0.85rem; color: var(--text-muted); margin-right: 6px; }
+
+        .tag { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+        .tag-ok { background: rgba(34,197,94,0.15); color: var(--success); }
+        .tag-warn { background: rgba(234,179,8,0.15); color: var(--warning); }
+        .tag-danger { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+        .product-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; text-align: center; transition: all var(--transition); }
+        .product-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+        .product-title { font-weight: 700; margin-bottom: 4px; font-size: 0.9rem; }
+        .product-price { color: var(--primary); font-size: 1.1rem; font-weight: 800; }
+        .product-stock { font-size: 0.75rem; color: var(--text-muted); margin-top: 3px; }
+
+        .member-hero { background: linear-gradient(135deg, var(--primary), #fb923c); color: #fff; border: none; }
+        .member-hero .card-title { color: #fff; }
+        .member-hero .days { font-size: 2.4rem; font-weight: 800; }
+        .member-hero .meta { font-size: 0.85rem; opacity: 0.9; }
+
+        .chart-box { position: relative; height: 240px; }
+        .report-filters { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; align-items: flex-end; }
+        .report-filters .form-group { margin-bottom: 0; min-width: 130px; }
+
+        .loyalty-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+        @media (max-width: 600px) { .loyalty-grid { grid-template-columns: repeat(3, 1fr); } }
+        .loyalty-card {
+            aspect-ratio: 1; border-radius: 12px; border: 2px solid var(--border);
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 800; font-size: 1.1rem; background: var(--bg); color: var(--text-muted);
+            transition: all 0.4s ease;
+        }
+        .loyalty-card.filled {
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            border-color: var(--primary); color: #fff;
+            box-shadow: 0 4px 16px rgba(249,115,22,0.35); transform: scale(1.02);
+        }
+        .loyalty-progress { font-size: 0.95rem; color: var(--text-muted); margin-bottom: 14px; }
+
+        .qr-box { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+        #qr-canvas { background: #fff; padding: 12px; border-radius: 12px; }
+        .qr-code-label { font-family: monospace; font-size: 0.85rem; color: var(--text-muted); word-break: break-all; text-align: center; }
+
+        .menu-toggle { display: none; background: none; border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 1.1rem; }
+        @media (max-width: 720px) {
+            .sidebar { position: fixed; left: -260px; top: 56px; z-index: 40; height: calc(100vh - 56px); transition: left 0.25s ease; box-shadow: var(--shadow); }
+            .sidebar.open { left: 0; }
+            .menu-toggle { display: block; }
+            .content { padding: 16px; }
+        }
+
+        @media print {
+            .topbar, .sidebar, .toolbar, .pagination, .report-filters, .btn, .no-print, .menu-toggle { display: none !important; }
+            .content { max-width: 100%; padding: 0; }
+            body { background: white !important; color: black !important; }
+            .card { border: none !important; box-shadow: none !important; }
+            .print-header { display: block !important; text-align: center; margin-bottom: 24px; border-bottom: 2px solid #f97316; padding-bottom: 16px; }
+            .print-header h1 { font-size: 1.6rem; color: #ea580c; margin-bottom: 4px; }
+            .print-header .slogan { font-size: 1rem; color: #78716c; font-style: italic; }
+            .print-header .client-line { font-size: 1.15rem; font-weight: 700; margin-top: 10px; color: #1c1917; }
+        }
+        .print-header { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="auth-screen">
+    <div class="auth-card">
+        <div class="logo" style="justify-content:center; margin-bottom:16px;">
+            <span class="logo-mark">G</span> GYM PRO
+        </div>
+        <h2>Вход в систему</h2>
+        <p>Войдите через Google. Роль и доступы берутся из Firebase.</p>
+        <button class="btn btn-primary btn-block" onclick="loginWithGoogle()">Войти через Google</button>
+        <div id="firebase-status" style="margin-top:16px;color:var(--text-muted);font-size:0.8rem;"></div>
+    </div>
+</div>
+
+<div id="app-shell">
+    <div class="topbar">
+        <div style="display:flex; align-items:center; gap:12px;">
+            <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+            <div class="logo"><span class="logo-mark">G</span> GYM PRO</div>
+        </div>
+        <div class="topbar-right">
+            <button class="theme-btn" onclick="toggleTheme()" id="theme-icon">Тёмная</button>
+            <span id="user-name-display" style="font-weight:600; font-size:0.9rem;"></span>
+            <span id="user-role-display" class="role-badge"></span>
+            <button class="btn btn-outline btn-sm" onclick="logout()">Выход</button>
+        </div>
+    </div>
+    <div class="layout">
+        <aside class="sidebar" id="sidebar"></aside>
+        <main class="content" id="main-content"></main>
+    </div>
+</div>
+
+<div class="print-header" id="print-header">
+    <h1>GYM PRO</h1>
+    <div class="slogan" id="print-slogan">Сила начинается с первого шага. Желаем продуктивной тренировки!</div>
+    <div class="client-line" id="print-client"></div>
+</div>
+
+<script>
+/* ============================================================
+   FIREBASE
+   Firebase Web config is safe to keep in a public GitHub Pages app.
+   Security is enforced by Firestore Rules, not by hiding this config.
+   ============================================================ */
+const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+};
+
+const FIREBASE_READY = Boolean(
+    firebaseConfig.apiKey &&
+    firebaseConfig.projectId &&
+    firebaseConfig.appId &&
+    firebaseConfig.apiKey !== 'YOUR_API_KEY' &&
+    firebaseConfig.projectId !== 'YOUR_PROJECT_ID'
+);
+
+let db = null;
+let auth = null;
+let useFirestore = false;
+let authReady = false;
+
+try {
+    if (FIREBASE_READY) {
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        auth = firebase.auth();
+        db = firebase.firestore();
+        useFirestore = true;
+    }
+} catch (e) {
+    console.error('Firebase initialization failed:', e);
+}
+
+const STORE_KEYS = {
+    inventory: 'gym_store',
+    clients: 'gym_members',
+    activity: 'gym_activity',
+    metrics: 'gym_member_metrics',
+    loyalty: 'gym_loyalty'
+};
+
+function load(key) {
+    try {
+        const raw = localStorage.getItem(STORE_KEYS[key]);
+        return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+        console.warn('Local cache read failed:', e);
+        return null;
+    }
+}
+
+function cache(key, data) {
+    try { localStorage.setItem(STORE_KEYS[key], JSON.stringify(data)); } catch (e) {}
+}
+
+async function save(key, data) {
+    cache(key, data);
+    if (!useFirestore || !db || !auth?.currentUser) return;
+    try {
+        await db.collection('gym_data').doc(key).set({
+            data,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            updatedBy: auth.currentUser.uid
+        });
+    } catch (e) {
+        console.error('Firestore save failed:', e);
+        throw e;
+    }
+}
+
+async function saveMemberData(uid, key, data) {
+    cache(key, data);
+    if (!useFirestore || !db || !uid) return;
+    await db.collection('users').doc(uid).collection('private').doc(key).set({
+        data,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+}
+
+const DEFAULT_INVENTORY = [
+    { id: 1, name: 'Протеин Whey 1kg', price: 18000, stock: 12 },
+    { id: 2, name: 'BCAA 300g', price: 9500, stock: 4 },
+    { id: 3, name: 'Вода 0.5l', price: 300, stock: 45 },
+    { id: 4, name: 'Энергетический батончик', price: 800, stock: 2 },
+    { id: 5, name: 'Креатин 300g', price: 6500, stock: 8 },
+    { id: 6, name: 'Гейнер 2kg', price: 14500, stock: 6 },
+    { id: 7, name: 'Изотоник 500ml', price: 450, stock: 30 },
+    { id: 8, name: 'Полотенце', price: 2500, stock: 15 }
+];
+
+const DEFAULT_CLIENTS = [
+    { id: 1, name: 'Алексей Смирнов', phone: '+7 701 111 2233', payDate: '2026-09-29', lastVisit: '2026-09-20', qrCode: 'GYM-1-ALEX' },
+    { id: 2, name: 'Елена Иванова', phone: '+7 707 333 4455', payDate: '2026-10-05', lastVisit: '2026-09-27', qrCode: 'GYM-2-ELENA' },
+    { id: 3, name: 'Дмитрий Петров', phone: '+7 705 777 8899', payDate: '2026-09-25', lastVisit: '2026-09-10', qrCode: 'GYM-3-DMIT' },
+    { id: 4, name: 'Мария Козлова', phone: '+7 702 555 6677', payDate: '2026-10-12', lastVisit: '2026-09-15', qrCode: 'GYM-4-MARI' },
+    { id: 5, name: 'Игорь Волков', phone: '+7 708 999 0011', payDate: '2026-09-20', lastVisit: '2026-09-05', qrCode: 'GYM-5-IGOR' },
+    { id: 6, name: 'Анна Соколова', phone: '+7 701 222 3344', payDate: '2026-10-01', lastVisit: '2026-09-26', qrCode: 'GYM-6-ANNA' },
+    { id: 7, name: 'Сергей Морозов', phone: '+7 705 444 5566', payDate: '2026-09-18', lastVisit: '2026-08-28', qrCode: 'GYM-7-SERG' },
+    { id: 8, name: 'Ольга Лебедева', phone: '+7 707 666 7788', payDate: '2026-10-08', lastVisit: '2026-09-22', qrCode: 'GYM-8-OLGA' },
+    { id: 9, name: 'Павел Новиков', phone: '+7 702 888 9900', payDate: '2026-09-30', lastVisit: '2026-09-12', qrCode: 'GYM-9-PAVL' },
+    { id: 10, name: 'Наталья Федорова', phone: '+7 708 111 2233', payDate: '2026-10-15', lastVisit: '2026-09-25', qrCode: 'GYM-10-NATA' }
+];
+
+let inventory = load('inventory') || DEFAULT_INVENTORY.map(x => ({...x}));
+let clients = load('clients') || DEFAULT_CLIENTS.map(x => ({...x}));
+let activityLog = load('activity') || [];
+let memberMetrics = load('metrics') || { dates: [], weights: [], biceps: [] };
+let loyaltyMap = load('loyalty') || {};
+
+function normalizeClients() {
+    clients.forEach(c => {
+        if (!c.qrCode) c.qrCode = 'GYM-' + c.id + '-' + (c.name.split(' ')[0] || 'USER').toUpperCase().slice(0, 4);
+    });
+}
+normalizeClients();
+
+async function loadFromFirestore() {
+    if (!useFirestore || !db) return;
+    try {
+        const keys = currentUser?.role === 'member' ? ['inventory'] : ['inventory', 'clients', 'activity'];
+        for (const key of keys) {
+            const snap = await db.collection('gym_data').doc(key).get();
+            if (snap.exists && snap.data().data) {
+                const d = snap.data().data;
+                if (key === 'inventory') inventory = d;
+                if (key === 'clients') clients = d;
+                if (key === 'activity') activityLog = d;
+                cache(key, d);
+            }
+        }
+        normalizeClients();
+        if (currentUser?.uid) {
+            const [metricsSnap, loyaltySnap] = await Promise.all([
+                db.collection('users').doc(currentUser.uid).collection('private').doc('metrics').get(),
+                db.collection('users').doc(currentUser.uid).collection('private').doc('loyalty').get()
+            ]);
+            if (metricsSnap.exists && metricsSnap.data().data) {
+                memberMetrics = metricsSnap.data().data;
+                cache('metrics', memberMetrics);
+            }
+            if (loyaltySnap.exists && loyaltySnap.data().data) {
+                const cid = String(currentUser.clientId || '');
+                loyaltyMap[cid] = loyaltySnap.data().data;
+                cache('loyalty', loyaltyMap);
+            }
+        }
+    } catch (e) {
+        console.error('Firestore load failed:', e);
+        throw e;
+    }
+}
+
+async function ensureInitialCloudData() {
+    if (!useFirestore || !db || !auth?.currentUser || currentUser?.role !== 'admin') return;
+    const defaults = {
+        inventory: DEFAULT_INVENTORY,
+        clients: DEFAULT_CLIENTS,
+        activity: []
+    };
+    for (const [key, data] of Object.entries(defaults)) {
+        const ref = db.collection('gym_data').doc(key);
+        const snap = await ref.get();
+        if (!snap.exists) {
+            await ref.set({
+                data,
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                updatedBy: auth.currentUser.uid
+            });
+        }
+    }
+    await loadFromFirestore();
+}
+
+async function syncMemberProfile(client) {
+    if (!useFirestore || !db || !auth?.currentUser || currentUser?.role !== 'admin') return;
+    const snap = await db.collection('users').where('clientId', '==', client.id).get();
+    const batch = db.batch();
+    snap.forEach(doc => {
+        const ref = db.collection('users').doc(doc.id);
+        batch.update(ref, {
+            client: {
+                name: client.name,
+                phone: client.phone || '',
+                payDate: client.payDate,
+                lastVisit: client.lastVisit || '',
+                qrCode: client.qrCode
+            },
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    });
+    if (!snap.empty) await batch.commit();
+}
+
+async function getUserProfile(uid) {
+    if (!useFirestore || !db || !uid) return null;
+    const snap = await db.collection('users').doc(uid).get();
+    return snap.exists ? snap.data() : null;
+}
+
+function showAuthStatus(message, isError = false) {
+    const el = document.getElementById('firebase-status');
+    if (!el) return;
+    el.textContent = message;
+    el.style.color = isError ? 'var(--danger)' : 'var(--text-muted)';
+}
+
+let currentUser = null;
+const PAGE_SIZE = 5;
+const pages = { clients: 1, inventory: 1, absent: 1, payments: 1 };
+let progressChart = null, visitsChart = null, revenueChart = null;
+
+const PRINT_SLOGANS = [
+    'Сила начинается с первого шага. Желаем продуктивной тренировки!',
+    'Каждый визит — шаг к лучшей версии себя. Удачи!',
+    'Тренируйся с умом, отдыхай с удовольствием. GYM PRO рядом!',
+    'Ваше здоровье — наш приоритет. Отличной тренировки!',
+    'Дисциплина побеждает мотивацию. Увидимся в зале!'
+];
+
+const NAV = {
+    admin: [
+        { section: 'Аналитика', items: [
+            { id: 'reports', label: 'Отчётность', icon: '◈' },
+        ]},
+        { section: 'Клиенты', items: [
+            { id: 'clients', label: 'Список клиентов', icon: '◎' },
+            { id: 'absent', label: 'Пропускающие', icon: '◌' },
+            { id: 'import', label: 'Импорт Excel', icon: '↓' },
+        ]},
+        { section: 'Склад', items: [
+            { id: 'inventory', label: 'Остатки', icon: '▣' },
+            { id: 'add-product', label: 'Добавить товар', icon: '+' },
+        ]},
+        { section: 'Магазин', items: [
+            { id: 'store', label: 'Витрина', icon: '◇' },
+        ]},
+    ],
+    reception: [
+        { section: 'Клиенты', items: [
+            { id: 'clients', label: 'Список клиентов', icon: '◎' },
+            { id: 'payments', label: 'Платежи', icon: '◎' },
+            { id: 'absent', label: 'Пропускающие', icon: '◌' },
+        ]},
+        { section: 'Посещения', items: [
+            { id: 'qr-scan', label: 'QR-скан посещения', icon: '▣' },
+        ]},
+        { section: 'Касса', items: [
+            { id: 'sell', label: 'Продажа', icon: '◇' },
+        ]},
+        { section: 'Магазин', items: [
+            { id: 'store', label: 'Витрина', icon: '◇' },
+        ]},
+    ],
+    member: [
+        { section: 'Мой кабинет', items: [
+            { id: 'subscription', label: 'Абонемент', icon: '◈' },
+            { id: 'metrics', label: 'Метрики', icon: '◎' },
+            { id: 'loyalty', label: 'Карточки посещений', icon: '▣' },
+            { id: 'my-qr', label: 'Мой QR-код', icon: '◇' },
+        ]},
+        { section: 'Магазин', items: [
+            { id: 'store', label: 'Витрина', icon: '◇' },
+        ]},
+    ]
+};
+
+if (useFirestore && auth) {
+    auth.onAuthStateChanged(async user => {
+        authReady = true;
+        await handleAuthUser(user);
+    });
+} else {
+    authReady = true;
+    handleAuthUser(null);
+}
+
+async function loginWithGoogle() {
+    if (!useFirestore || !auth) {
+        showAuthStatus('Firebase ещё не настроен. Откройте README и заполните конфигурацию.', true);
+        return;
+    }
+    try {
+        showAuthStatus('Открываем Google…');
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: 'select_account' });
+        await auth.signInWithPopup(provider);
+    } catch (e) {
+        console.error(e);
+        showAuthStatus('Ошибка входа: ' + (e.message || 'неизвестная ошибка'), true);
+    }
+}
+
+async function handleAuthUser(firebaseUser) {
+    if (!firebaseUser) {
+        currentUser = null;
+        document.getElementById('auth-screen').style.display = 'flex';
+        document.getElementById('app-shell').style.display = 'none';
+        document.getElementById('sidebar').innerHTML = '';
+        document.getElementById('main-content').innerHTML = '';
+        if (!FIREBASE_READY) showAuthStatus('Firebase не настроен. Заполните конфигурацию в index.html.', true);
+        else showAuthStatus('Войдите через Google.');
+        return;
+    }
+
+    try {
+        const profile = await getUserProfile(firebaseUser.uid);
+        if (!profile || !['admin', 'reception', 'member'].includes(profile.role)) {
+            await auth.signOut();
+            showAuthStatus('Для этого Google-аккаунта ещё не назначена роль в Firebase.', true);
+            return;
+        }
+        currentUser = {
+            uid: firebaseUser.uid,
+            name: firebaseUser.displayName || firebaseUser.email || 'Пользователь',
+            email: firebaseUser.email || '',
+            role: profile.role,
+            clientId: profile.clientId || null,
+            clientName: profile.clientName || ''
+        };
+
+        await loadFromFirestore();
+        if (currentUser.role === 'admin') {
+            await ensureInitialCloudData();
+        }
+
+        if (currentUser.role === 'member') {
+            const member = profile.client || {};
+            if (!currentUser.clientId || !member.name || !member.qrCode) {
+                await auth.signOut();
+                showAuthStatus('Для аккаунта посетителя заполните clientId и client в users/{uid}.', true);
+                return;
+            }
+            currentUser.member = member;
+            currentUser.clientName = member.name;
+            currentUser.qrCode = member.qrCode;
+        }
+
+        document.getElementById('auth-screen').style.display = 'none';
+        document.getElementById('app-shell').style.display = 'block';
+        document.getElementById('user-name-display').textContent = currentUser.name;
+        document.getElementById('user-role-display').textContent = currentUser.role;
+        buildSidebar();
+        showPage(NAV[currentUser.role][0].items[0].id);
+    } catch (e) {
+        console.error(e);
+        showAuthStatus('Не удалось загрузить профиль: ' + (e.message || 'ошибка Firebase'), true);
+        if (auth) await auth.signOut().catch(() => {});
+    }
+}
+
+function logout() {
+    if (auth) auth.signOut().catch(() => {});
+    currentUser = null;
+}
+
+function toggleTheme() {
+    const html = document.documentElement;
+    const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', next);
+    document.getElementById('theme-icon').textContent = next === 'dark' ? 'Тёмная' : 'Светлая';
+    const active = document.querySelector('.page.active');
+    if (active) {
+        if (active.id === 'page-reports') updateAdminReports();
+        if (active.id === 'page-metrics') renderMemberChart();
+    }
+}
+
+function toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+}
+
+function buildSidebar() {
+    const nav = NAV[currentUser.role] || [];
+    let html = '';
+    nav.forEach(sec => {
+        html += `<div class="sidebar-section"><div class="sidebar-label">${sec.section}</div>`;
+        sec.items.forEach(item => {
+            html += `<button class="nav-item" data-page="${item.id}" onclick="showPage('${item.id}')">
+                <span class="nav-icon">${item.icon}</span> ${item.label}</button>`;
+        });
+        html += '</div>';
+    });
+    document.getElementById('sidebar').innerHTML = html;
+}
+
+function setActiveNav(pageId) {
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === pageId));
+}
+
+function showPage(pageId) {
+    setActiveNav(pageId);
+    document.getElementById('sidebar').classList.remove('open');
+    const main = document.getElementById('main-content');
+    main.innerHTML = '';
+    const page = document.createElement('div');
+    page.className = 'page active';
+    page.id = 'page-' + pageId;
+    const map = {
+        reports: tplReports, clients: tplClients, absent: tplAbsent, import: tplImport,
+        inventory: tplInventory, 'add-product': tplAddProduct, store: tplStore,
+        payments: tplPayments, sell: tplSell, 'qr-scan': tplQrScan,
+        subscription: tplSubscription, metrics: tplMetrics, loyalty: tplLoyalty, 'my-qr': tplMyQr
+    };
+    page.innerHTML = (map[pageId] || (() => '<p>Раздел</p>'))();
+    main.appendChild(page);
+    if (pageId === 'reports') updateAdminReports();
+    if (pageId === 'clients') renderClientsTable();
+    if (pageId === 'absent') renderAbsentTable();
+    if (pageId === 'inventory') renderInventoryTable();
+    if (pageId === 'store') renderStore();
+    if (pageId === 'payments') renderPaymentsTable();
+    if (pageId === 'sell') fillSellSelect();
+    if (pageId === 'metrics') renderMemberChart();
+    if (pageId === 'loyalty') renderLoyaltyCards();
+    if (pageId === 'my-qr') renderMyQr();
+}
+
+function tplReports() {
+    return `
+        <div class="page-title">Оперативная отчётность</div>
+        <div class="page-desc">Неделя / месяц / произвольный период</div>
+        <div class="card">
+            <div class="stat-grid" id="admin-stats"></div>
+            <div class="report-filters no-print">
+                <div class="form-group"><label>Период</label>
+                    <select id="report-period" class="form-control" onchange="updateAdminReports()">
+                        <option value="week">Текущая неделя</option>
+                        <option value="month" selected>Текущий месяц</option>
+                        <option value="custom">Произвольный</option>
+                    </select>
+                </div>
+                <div class="form-group" id="custom-from-wrap" style="display:none;"><label>С</label>
+                    <input type="date" id="report-from" class="form-control" onchange="updateAdminReports()">
+                </div>
+                <div class="form-group" id="custom-to-wrap" style="display:none;"><label>По</label>
+                    <input type="date" id="report-to" class="form-control" onchange="updateAdminReports()">
+                </div>
+                <div class="form-group"><label>Группировка</label>
+                    <select id="report-group" class="form-control" onchange="updateAdminReports()">
+                        <option value="weekday">По дням недели</option>
+                        <option value="day">По дням</option>
+                        <option value="month">По месяцам</option>
+                    </select>
+                </div>
+            </div>
+            <div class="grid grid-2" style="margin-bottom:0;">
+                <div class="card" style="box-shadow:none;padding:14px;">
+                    <div class="card-title" style="font-size:0.9rem;">Посещения</div>
+                    <div class="chart-box"><canvas id="adminVisitsChart"></canvas></div>
+                </div>
+                <div class="card" style="box-shadow:none;padding:14px;">
+                    <div class="card-title" style="font-size:0.9rem;">Выручка</div>
+                    <div class="chart-box"><canvas id="adminRevenueChart"></canvas></div>
+                </div>
+            </div>
+        </div>
+        <div class="card no-print">
+            <div class="card-title">Печать</div>
+            <button class="btn btn-primary" onclick="doPrint('Сводный отчёт')">Сводный отчёт</button>
+        </div>`;
+}
+
+function tplClients() {
+    return `
+        <div class="page-title">Список клиентов</div>
+        <div class="page-desc">Поиск, пагинация, QR-коды</div>
+        <div class="card">
+            <div class="toolbar no-print">
+                <div class="search-box">
+                    <span class="search-icon">⌕</span>
+                    <input type="text" id="clients-search" class="form-control" placeholder="ФИО или телефон..." oninput="filterClients()">
+                </div>
+                <button class="btn btn-outline btn-sm" onclick="doPrint('Список клиентов')">Печать</button>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>ФИО</th><th>Телефон</th><th>Дата оплаты</th><th>QR</th><th>Статус</th></tr></thead>
+                    <tbody id="clients-tbody"></tbody>
+                </table>
+            </div>
+            <div class="pagination no-print" id="clients-pagination"></div>
+        </div>`;
+}
+
+function tplAbsent() {
+    return `
+        <div class="page-title">Пропускающие</div>
+        <div class="page-desc">Без визита более 7 дней</div>
+        <div class="card">
+            <div class="toolbar no-print">
+                <div class="search-box">
+                    <span class="search-icon">⌕</span>
+                    <input type="text" id="abs-search" class="form-control" placeholder="Поиск..." oninput="filterAbsent()">
+                </div>
+                <button class="btn btn-outline btn-sm" onclick="doPrint('Пропускающие')">Печать</button>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>ФИО</th><th>Телефон</th><th>Последний визит</th><th>Дней</th></tr></thead>
+                    <tbody id="absent-tbody"></tbody>
+                </table>
+            </div>
+            <div class="pagination no-print" id="abs-pagination"></div>
+        </div>`;
+}
+
+function tplImport() {
+    return `
+        <div class="page-title">Импорт Excel</div>
+        <div class="page-desc">Файл .xlsx / .xls. Колонки: ФИО | Телефон | ДатаОплаты | Тариф</div>
+        <div class="card" style="max-width:440px;">
+            <button class="btn btn-outline btn-sm" style="margin-bottom:12px;" onclick="downloadSampleExcel()">Скачать пример Excel</button>
+            <input type="file" id="excel-file-input" accept=".xlsx,.xls" class="form-control" style="margin-bottom:12px;">
+            <button class="btn btn-primary btn-block" onclick="importExcel()">Загрузить Excel</button>
+        </div>`;
+}
+
+function tplInventory() {
+    return `
+        <div class="page-title">Склад</div>
+        <div class="card">
+            <div class="toolbar no-print">
+                <div class="search-box">
+                    <span class="search-icon">⌕</span>
+                    <input type="text" id="inv-search" class="form-control" placeholder="Поиск..." oninput="filterInventory()">
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Товар</th><th>Цена</th><th>Остаток</th><th>Статус</th></tr></thead>
+                    <tbody id="inv-tbody"></tbody>
+                </table>
+            </div>
+            <div class="pagination no-print" id="inv-pagination"></div>
+        </div>`;
+}
+
+function tplAddProduct() {
+    return `
+        <div class="page-title">Добавить товар</div>
+        <div class="card" style="max-width:400px;">
+            <div class="form-group"><label>Название</label><input type="text" id="adm-p-name" class="form-control"></div>
+            <div class="form-group"><label>Цена (₸)</label><input type="number" id="adm-p-price" class="form-control"></div>
+            <div class="form-group"><label>Остаток</label><input type="number" id="adm-p-stock" class="form-control"></div>
+            <button class="btn btn-primary btn-block" onclick="adminAddProduct()">Сохранить</button>
+        </div>`;
+}
+
+function tplStore() {
+    return `
+        <div class="page-title">Магазин</div>
+        <div class="card"><div class="product-grid" id="product-list"></div></div>`;
+}
+
+function tplPayments() {
+    return `
+        <div class="page-title">Платежи клиентов</div>
+        <div class="card">
+            <div class="toolbar no-print">
+                <div class="search-box">
+                    <span class="search-icon">⌕</span>
+                    <input type="text" id="pay-search" class="form-control" placeholder="Поиск..." oninput="filterPayments()">
+                </div>
+                <button class="btn btn-outline btn-sm" onclick="doPrint('Платежи')">Печать</button>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>ФИО</th><th>Телефон</th><th>Дата оплаты</th><th>Статус</th><th class="no-print">Действие</th></tr></thead>
+                    <tbody id="pay-tbody"></tbody>
+                </table>
+            </div>
+            <div class="pagination no-print" id="pay-pagination"></div>
+        </div>`;
+}
+
+function tplSell() {
+    return `
+        <div class="page-title">Продажа на кассе</div>
+        <div class="card" style="max-width:380px;">
+            <div class="form-group"><label>Товар</label><select id="rec-product-select" class="form-control"></select></div>
+            <div class="form-group"><label>Количество</label><input type="number" id="rec-product-qty" class="form-control" value="1" min="1"></div>
+            <button class="btn btn-primary btn-block" onclick="sellProductReception()">Оформить</button>
+        </div>`;
+}
+
+function tplQrScan() {
+    return `
+        <div class="page-title">QR-скан посещения</div>
+        <div class="page-desc">Введите или отсканируйте код — визит засчитается, карточка лояльности обновится</div>
+        <div class="card" style="max-width:420px;">
+            <div class="form-group">
+                <label>Код QR / вручную</label>
+                <input type="text" id="qr-input" class="form-control" placeholder="GYM-1-ALEX" autofocus
+                    onkeydown="if(event.key==='Enter') processQrScan()">
+            </div>
+            <button class="btn btn-primary btn-block" onclick="processQrScan()">Засчитать посещение</button>
+            <div id="qr-result" style="margin-top:16px; font-size:0.95rem;"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Быстрый выбор клиента</div>
+            <div class="form-group">
+                <select id="qr-client-select" class="form-control" onchange="document.getElementById('qr-input').value=this.value">
+                    <option value="">— выбрать —</option>
+                    ${clients.map(c => `<option value="${c.qrCode}">${c.name} (${c.qrCode})</option>`).join('')}
+                </select>
+            </div>
+        </div>`;
+}
+
+function tplSubscription() {
+    const c = currentUser.member || {};
+    const daysLeft = c.payDate ? Math.max(0, Math.ceil((new Date(c.payDate) - new Date()) / 86400000)) : 0;
+    return `
+        <div class="page-title">Абонемент</div>
+        <div class="card member-hero">
+            <div class="card-title">Ваш абонемент</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;">
+                <div>
+                    <p class="meta">Осталось дней до оплаты</p>
+                    <div class="days">${daysLeft}</div>
+                </div>
+                <div style="text-align:right;">
+                    <p class="meta">Тариф: Безлимит Месяц</p>
+                    <p class="meta">Оплата до: ${c.payDate}</p>
+                </div>
+            </div>
+        </div>`;
+}
+
+function tplMetrics() {
+    return `
+        <div class="page-title">Метрики</div>
+        <div class="grid">
+            <div class="card">
+                <div class="card-title">Замеры</div>
+                <div class="form-group"><label>Возраст</label><input type="number" id="m-age" class="form-control" value="26"></div>
+                <div class="form-group"><label>Вес (кг)</label><input type="number" id="m-weight" class="form-control" value="78.5" step="0.1"></div>
+                <div class="form-group"><label>Бицепс (см)</label><input type="number" id="m-biceps" class="form-control" value="38.5" step="0.1"></div>
+                <div class="form-group"><label>Талия (см)</label><input type="number" id="m-waist" class="form-control" value="82"></div>
+                <button class="btn btn-primary btn-block" onclick="updateMemberMetrics()">Сохранить</button>
+            </div>
+            <div class="card">
+                <div class="card-title">График</div>
+                <div class="chart-box"><canvas id="memberProgressChart"></canvas></div>
+            </div>
+        </div>`;
+}
+
+function tplLoyalty() {
+    return `
+        <div class="page-title">Карточки посещений</div>
+        <div class="page-desc">15 карточек. При каждом скане QR на ресепшене одна карточка загорается оранжевым.</div>
+        <div class="card">
+            <div class="loyalty-progress" id="loyalty-progress-text"></div>
+            <div class="loyalty-grid" id="loyalty-grid"></div>
+        </div>`;
+}
+
+function tplMyQr() {
+    return `
+        <div class="page-title">Мой QR-код</div>
+        <div class="page-desc">Покажите этот код на ресепшене</div>
+        <div class="card">
+            <div class="qr-box">
+                <canvas id="qr-canvas"></canvas>
+                <div class="qr-code-label" id="qr-code-label"></div>
+                <p style="color:var(--text-muted);font-size:0.85rem;">${currentUser.clientName || currentUser.name}</p>
+            </div>
+        </div>`;
+}
+
+async function processQrScan() {
+    const code = (document.getElementById('qr-input')?.value || '').trim().toUpperCase();
+    const resultEl = document.getElementById('qr-result');
+    if (!code) {
+        if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Введите код</span>';
+        return;
+    }
+    const client = clients.find(c => (c.qrCode || '').toUpperCase() === code);
+    if (!client) {
+        if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Клиент не найден</span>';
+        return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    client.lastVisit = today;
+    try { await save('clients', clients); } catch (e) { if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Не удалось сохранить посещение</span>'; return; }
+    let entry = activityLog.find(a => a.date === today);
+    if (!entry) {
+        entry = { date: today, visits: 0, sales: 0, revenue: 0 };
+        activityLog.unshift(entry);
+    }
+    entry.visits += 1;
+    try { await save('activity', activityLog); } catch (e) { if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Не удалось сохранить статистику</span>'; return; }
+    const cid = String(client.id);
+    let filled = loyaltyMap[cid] || 0;
+    if (filled < 15) filled += 1;
+    loyaltyMap[cid] = filled;
+    try { await saveMemberData(currentUser.uid, 'loyalty', filled); } catch (e) { console.error(e); }
+    if (resultEl) {
+        resultEl.innerHTML = `
+            <span class="tag tag-ok">Посещение засчитано</span>
+            <div style="margin-top:8px;"><b>${client.name}</b></div>
+            <div style="color:var(--text-muted);font-size:0.9rem;">Карточек: ${filled} / 15</div>`;
+    }
+    document.getElementById('qr-input').value = '';
+}
+
+function renderLoyaltyCards() {
+    const cid = String(currentUser.clientId || clients[0]?.id);
+    const filled = loyaltyMap[cid] || 0;
+    const grid = document.getElementById('loyalty-grid');
+    const txt = document.getElementById('loyalty-progress-text');
+    if (txt) txt.textContent = `Заполнено ${filled} из 15. Каждый скан QR зажигает следующую карточку.`;
+    if (!grid) return;
+    let html = '';
+    for (let i = 1; i <= 15; i++) {
+        html += `<div class="loyalty-card ${i <= filled ? 'filled' : ''}">${i}</div>`;
+    }
+    grid.innerHTML = html;
+}
+
+function renderMyQr() {
+    const code = currentUser.qrCode || 'GYM-MEMBER';
+    const label = document.getElementById('qr-code-label');
+    if (label) label.textContent = code;
+    const canvas = document.getElementById('qr-canvas');
+    if (canvas && typeof QRCode !== 'undefined') {
+        QRCode.toCanvas(canvas, code, { width: 200, margin: 2, color: { dark: '#ea580c', light: '#ffffff' } }, err => {
+            if (err) console.error(err);
+        });
+    }
+}
+
+function renderPagination(containerId, total, current, onPage) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    el.innerHTML = '';
+    if (total === 0) return;
+    const info = document.createElement('span');
+    info.className = 'page-info';
+    info.textContent = `${(current-1)*PAGE_SIZE+1}–${Math.min(current*PAGE_SIZE, total)} из ${total}`;
+    el.appendChild(info);
+    const prev = document.createElement('button');
+    prev.className = 'page-btn'; prev.textContent = '‹'; prev.disabled = current <= 1;
+    prev.onclick = () => onPage(current - 1);
+    el.appendChild(prev);
+    let start = Math.max(1, current - 2);
+    let end = Math.min(totalPages, start + 4);
+    if (end - start < 4) start = Math.max(1, end - 4);
+    for (let i = start; i <= end; i++) {
+        const b = document.createElement('button');
+        b.className = 'page-btn' + (i === current ? ' active' : '');
+        b.textContent = i;
+        b.onclick = () => onPage(i);
+        el.appendChild(b);
+    }
+    const next = document.createElement('button');
+    next.className = 'page-btn'; next.textContent = '›'; next.disabled = current >= totalPages;
+    next.onclick = () => onPage(current + 1);
+    el.appendChild(next);
+}
+
+function getFilteredClients(q) {
+    q = (q || '').toLowerCase().trim();
+    let list = [...clients].sort((a, b) => new Date(a.payDate) - new Date(b.payDate));
+    if (q) list = list.filter(c => c.name.toLowerCase().includes(q) || c.phone.replace(/\s/g, '').includes(q.replace(/\s/g, '')));
+    return list;
+}
+
+function filterClients() { pages.clients = 1; renderClientsTable(); }
+function renderClientsTable() {
+    const q = document.getElementById('clients-search')?.value || '';
+    const list = getFilteredClients(q);
+    const total = list.length;
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages.clients > totalPages) pages.clients = totalPages;
+    const slice = list.slice((pages.clients - 1) * PAGE_SIZE, pages.clients * PAGE_SIZE);
+    const tbody = document.getElementById('clients-tbody');
+    if (!tbody) return;
+    const today = new Date();
+    tbody.innerHTML = slice.length ? slice.map(c => {
+        const overdue = new Date(c.payDate) < today;
+        const st = overdue ? '<span class="tag tag-danger">Просрочено</span>' : '<span class="tag tag-ok">Ожидается</span>';
+        return `<tr><td><b>${c.name}</b></td><td>${c.phone}</td><td>${c.payDate}</td><td><code style="font-size:0.75rem">${c.qrCode||''}</code></td><td>${st}</td></tr>`;
+    }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Нет данных</td></tr>';
+    renderPagination('clients-pagination', total, pages.clients, p => { pages.clients = p; renderClientsTable(); });
+}
+
+function getAbsentList(q) {
+    q = (q || '').toLowerCase().trim();
+    const ref = new Date();
+    let list = clients.map(c => ({
+        ...c,
+        daysAbsent: Math.floor((ref - new Date(c.lastVisit)) / 86400000)
+    })).filter(c => c.daysAbsent > 7);
+    if (q) list = list.filter(c => c.name.toLowerCase().includes(q) || c.phone.replace(/\s/g, '').includes(q.replace(/\s/g, '')));
+    return list.sort((a, b) => b.daysAbsent - a.daysAbsent);
+}
+function filterAbsent() { pages.absent = 1; renderAbsentTable(); }
+function renderAbsentTable() {
+    const q = document.getElementById('abs-search')?.value || '';
+    const list = getAbsentList(q);
+    const total = list.length;
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages.absent > totalPages) pages.absent = totalPages;
+    const slice = list.slice((pages.absent - 1) * PAGE_SIZE, pages.absent * PAGE_SIZE);
+    const tbody = document.getElementById('absent-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = slice.length ? slice.map(c =>
+        `<tr><td>${c.name}</td><td>${c.phone}</td><td>${c.lastVisit}</td><td><b style="color:var(--warning)">${c.daysAbsent} дн.</b></td></tr>`
+    ).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Нет пропускающих</td></tr>';
+    renderPagination('abs-pagination', total, pages.absent, p => { pages.absent = p; renderAbsentTable(); });
+}
+
+function getFilteredInv(q) {
+    q = (q || '').toLowerCase().trim();
+    let list = [...inventory];
+    if (q) list = list.filter(i => i.name.toLowerCase().includes(q));
+    return list;
+}
+function filterInventory() { pages.inventory = 1; renderInventoryTable(); }
+function renderInventoryTable() {
+    const q = document.getElementById('inv-search')?.value || '';
+    const list = getFilteredInv(q);
+    const total = list.length;
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages.inventory > totalPages) pages.inventory = totalPages;
+    const slice = list.slice((pages.inventory - 1) * PAGE_SIZE, pages.inventory * PAGE_SIZE);
+    const tbody = document.getElementById('inv-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = slice.length ? slice.map(i => {
+        const st = i.stock < 5 ? '<span class="tag tag-danger">Заканчивается</span>' : '<span class="tag tag-ok">В наличии</span>';
+        return `<tr><td>${i.name}</td><td>${i.price.toLocaleString('ru-RU')} ₸</td><td><b>${i.stock} шт</b></td><td>${st}</td></tr>`;
+    }).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Нет данных</td></tr>';
+    renderPagination('inv-pagination', total, pages.inventory, p => { pages.inventory = p; renderInventoryTable(); });
+}
+
+function filterPayments() { pages.payments = 1; renderPaymentsTable(); }
+function renderPaymentsTable() {
+    const q = document.getElementById('pay-search')?.value || '';
+    const list = getFilteredClients(q);
+    const total = list.length;
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages.payments > totalPages) pages.payments = totalPages;
+    const slice = list.slice((pages.payments - 1) * PAGE_SIZE, pages.payments * PAGE_SIZE);
+    const tbody = document.getElementById('pay-tbody');
+    if (!tbody) return;
+    const today = new Date();
+    tbody.innerHTML = slice.length ? slice.map(c => {
+        const overdue = new Date(c.payDate) < today;
+        const st = overdue ? '<span class="tag tag-danger">Просрочено</span>' : '<span class="tag tag-ok">Ожидается</span>';
+        return `<tr><td><b>${c.name}</b></td><td>${c.phone}</td><td>${c.payDate}</td><td>${st}</td>
+            <td class="no-print">${currentUser.role === 'admin' ? `<button class="btn btn-outline btn-sm" onclick="extendMembership(${c.id})">Продлить</button>` : '—'}</td></tr>`;
+    }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Нет данных</td></tr>';
+    renderPagination('pay-pagination', total, pages.payments, p => { pages.payments = p; renderPaymentsTable(); });
+}
+
+async function extendMembership(clientId) {
+    const client = clients.find(c => String(c.id) === String(clientId));
+    if (!client) return;
+    const base = new Date(client.payDate);
+    const now = new Date();
+    const start = Number.isNaN(base.getTime()) || base < now ? now : base;
+    start.setDate(start.getDate() + 30);
+    client.payDate = start.toISOString().slice(0, 10);
+    try {
+        await save('clients', clients);
+        await syncMemberProfile(client);
+        renderPaymentsTable();
+        alert(`Абонемент ${client.name} продлён до ${client.payDate}.`);
+    } catch (e) {
+        alert('Не удалось сохранить продление: ' + e.message);
+    }
+}
+
+function renderStore() {
+    const el = document.getElementById('product-list');
+    if (!el) return;
+    el.innerHTML = inventory.map(p => {
+        const stock = (currentUser.role === 'admin') ? `<div class="product-stock">Остаток: ${p.stock} шт</div>` : '';
+        return `<div class="product-card"><div class="product-title">${p.name}</div>
+            <div class="product-price">${p.price.toLocaleString('ru-RU')} ₸</div>${stock}</div>`;
+    }).join('');
+}
+
+function fillSellSelect() {
+    const sel = document.getElementById('rec-product-select');
+    if (!sel) return;
+    sel.innerHTML = inventory.map(p => `<option value="${p.id}">${p.name} (${p.price} ₸)</option>`).join('');
+}
+
+async function adminAddProduct() {
+    const name = document.getElementById('adm-p-name').value.trim();
+    const price = parseFloat(document.getElementById('adm-p-price').value);
+    const stock = parseInt(document.getElementById('adm-p-stock').value, 10);
+    if (!name || !Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) { alert('Введите корректные название, цену и остаток.'); return; }
+    inventory.push({ id: Date.now(), name, price, stock });
+    try { await save('inventory', inventory); } catch (e) { alert('Не удалось сохранить товар: ' + e.message); return; }
+    alert('Товар добавлен');
+    showPage('inventory');
+}
+
+async function sellProductReception() {
+    const pId = parseInt(document.getElementById('rec-product-select').value, 10);
+    const qty = parseInt(document.getElementById('rec-product-qty').value, 10);
+    if (!Number.isInteger(qty) || qty <= 0) { alert('Количество должно быть целым числом больше 0.'); return; }
+    const prod = inventory.find(p => p.id === pId);
+    if (prod && prod.stock >= qty) {
+        prod.stock -= qty;
+        try { await save('inventory', inventory); } catch (e) { alert('Не удалось сохранить продажу: ' + e.message); return; }
+        const today = new Date().toISOString().slice(0, 10);
+        let entry = activityLog.find(a => a.date === today);
+        if (!entry) { entry = { date: today, visits: 0, sales: 0, revenue: 0 }; activityLog.unshift(entry); }
+        entry.sales += qty;
+        entry.revenue += prod.price * qty;
+        try { await save('activity', activityLog); } catch (e) { alert('Продажа сохранена, но статистику обновить не удалось: ' + e.message); }
+        alert('Продано: ' + (prod.price * qty).toLocaleString('ru-RU') + ' ₸');
+        fillSellSelect();
+    } else alert('Недостаточно товара');
+}
+
+function renderMemberChart() {
+    const canvas = document.getElementById('memberProgressChart');
+    if (!canvas) return;
+    if (progressChart) progressChart.destroy();
+    const textColor = getComputedStyle(document.body).getPropertyValue('--text').trim() || '#fafaf9';
+    progressChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: memberMetrics.dates,
+            datasets: [
+                { label: 'Вес (кг)', data: memberMetrics.weights, borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.1)', tension: 0.35, fill: true },
+                { label: 'Бицепс (см)', data: memberMetrics.biceps, borderColor: '#fb923c', backgroundColor: 'rgba(251,146,60,0.1)', tension: 0.35, fill: true }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: textColor } } },
+            scales: {
+                x: { ticks: { color: textColor }, grid: { color: 'rgba(128,128,128,0.15)' } },
+                y: { ticks: { color: textColor }, grid: { color: 'rgba(128,128,128,0.15)' } }
+            }
+        }
+    });
+}
+
+async function updateMemberMetrics() {
+    const w = parseFloat(document.getElementById('m-weight').value);
+    const b = parseFloat(document.getElementById('m-biceps').value);
+    if (isNaN(w) || isNaN(b)) { alert('Корректные значения'); return; }
+    const today = new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    memberMetrics.dates.push(today);
+    memberMetrics.weights.push(w);
+    memberMetrics.biceps.push(b);
+    try { await saveMemberData(currentUser.uid, 'metrics', memberMetrics); } catch (e) { alert('Не удалось сохранить метрики: ' + e.message); return; }
+    renderMemberChart();
+    alert('Сохранено');
+}
+
+function updateAdminReports() {
+    const period = document.getElementById('report-period')?.value || 'month';
+    const group = document.getElementById('report-group')?.value || 'weekday';
+    const fromWrap = document.getElementById('custom-from-wrap');
+    const toWrap = document.getElementById('custom-to-wrap');
+    if (fromWrap) fromWrap.style.display = period === 'custom' ? 'block' : 'none';
+    if (toWrap) toWrap.style.display = period === 'custom' ? 'block' : 'none';
+    const ref = new Date();
+    let from, to;
+    if (period === 'week') {
+        from = new Date(ref); from.setDate(from.getDate() - from.getDay() + 1);
+        to = new Date(from); to.setDate(to.getDate() + 6);
+    } else if (period === 'month') {
+        from = new Date(ref.getFullYear(), ref.getMonth(), 1);
+        to = new Date(ref.getFullYear(), ref.getMonth() + 1, 0);
+    } else {
+        const f = document.getElementById('report-from')?.value;
+        const t = document.getElementById('report-to')?.value;
+        from = f ? new Date(f) : new Date(ref.getFullYear(), ref.getMonth(), 1);
+        to = t ? new Date(t) : ref;
+    }
+    const fromStr = from.toISOString().slice(0, 10);
+    const toStr = to.toISOString().slice(0, 10);
+    const filtered = activityLog.filter(a => a.date >= fromStr && a.date <= toStr);
+    const totalVisits = filtered.reduce((s, a) => s + a.visits, 0);
+    const totalSales = filtered.reduce((s, a) => s + a.sales, 0);
+    const totalRevenue = filtered.reduce((s, a) => s + a.revenue, 0);
+    const overdue = clients.filter(c => new Date(c.payDate) < ref).length;
+    const absent = clients.filter(c => Math.floor((ref - new Date(c.lastVisit)) / 86400000) > 7).length;
+    const statsEl = document.getElementById('admin-stats');
+    if (statsEl) {
+        statsEl.innerHTML = `
+            <div class="stat-card"><div class="stat-value">${totalVisits}</div><div class="stat-label">Посещений</div></div>
+            <div class="stat-card"><div class="stat-value">${totalSales}</div><div class="stat-label">Продаж</div></div>
+            <div class="stat-card"><div class="stat-value">${(totalRevenue/1000).toFixed(0)}k</div><div class="stat-label">Выручка</div></div>
+            <div class="stat-card"><div class="stat-value">${overdue}</div><div class="stat-label">Просрочек</div></div>
+            <div class="stat-card"><div class="stat-value">${absent}</div><div class="stat-label">Пропускающих</div></div>
+            <div class="stat-card"><div class="stat-value">${inventory.reduce((s,i)=>s+i.stock,0)}</div><div class="stat-label">На складе</div></div>`;
+    }
+    const weekdays = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+    let labels = [], visitData = [], revenueData = [];
+    if (group === 'weekday') {
+        const buckets = Array(7).fill(0).map(() => ({ visits: 0, revenue: 0 }));
+        filtered.forEach(a => {
+            const wd = new Date(a.date).getDay();
+            buckets[wd].visits += a.visits;
+            buckets[wd].revenue += a.revenue;
+        });
+        const order = [1,2,3,4,5,6,0];
+        labels = order.map(i => weekdays[i]);
+        visitData = order.map(i => buckets[i].visits);
+        revenueData = order.map(i => buckets[i].revenue);
+    } else if (group === 'day') {
+        const sorted = [...filtered].sort((a,b) => a.date.localeCompare(b.date));
+        labels = sorted.map(a => a.date.slice(5));
+        visitData = sorted.map(a => a.visits);
+        revenueData = sorted.map(a => a.revenue);
+    } else {
+        const map = {};
+        filtered.forEach(a => {
+            const m = a.date.slice(0, 7);
+            if (!map[m]) map[m] = { visits: 0, revenue: 0 };
+            map[m].visits += a.visits;
+            map[m].revenue += a.revenue;
+        });
+        const keys = Object.keys(map).sort();
+        labels = keys;
+        visitData = keys.map(k => map[k].visits);
+        revenueData = keys.map(k => map[k].revenue);
+    }
+    const textColor = getComputedStyle(document.body).getPropertyValue('--text').trim() || '#fafaf9';
+    const primary = '#f97316';
+    const vCanvas = document.getElementById('adminVisitsChart');
+    if (vCanvas) {
+        if (visitsChart) visitsChart.destroy();
+        visitsChart = new Chart(vCanvas.getContext('2d'), {
+            type: 'bar',
+            data: { labels, datasets: [{ label: 'Посещения', data: visitData, backgroundColor: primary, borderRadius: 6 }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+                scales: { x: { ticks: { color: textColor }, grid: { display: false } }, y: { ticks: { color: textColor }, grid: { color: 'rgba(128,128,128,0.12)' } } } }
+        });
+    }
+    const rCanvas = document.getElementById('adminRevenueChart');
+    if (rCanvas) {
+        if (revenueChart) revenueChart.destroy();
+        revenueChart = new Chart(rCanvas.getContext('2d'), {
+            type: 'line',
+            data: { labels, datasets: [{ label: 'Выручка (₸)', data: revenueData, borderColor: primary, backgroundColor: 'rgba(249,115,22,0.12)', tension: 0.35, fill: true }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: textColor } } },
+                scales: { x: { ticks: { color: textColor }, grid: { color: 'rgba(128,128,128,0.12)' } }, y: { ticks: { color: textColor }, grid: { color: 'rgba(128,128,128,0.12)' } } } }
+        });
+    }
+}
+
+function downloadSampleExcel() {
+    const data = [
+        ['ФИО', 'Телефон', 'ДатаОплаты', 'Тариф'],
+        ['Иван Сергеев', '+77001234567', '2026-10-15', 'Годовой'],
+        ['Ольга Кириллова', '+77059876543', '2026-09-30', 'Месячный']
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Клиенты');
+    XLSX.writeFile(wb, 'sample_members.xlsx');
+}
+
+function importExcel() {
+    const file = document.getElementById('excel-file-input')?.files[0];
+    if (!file) { alert('Выберите файл Excel (.xlsx)'); return; }
+    const reader = new FileReader();
+    reader.onload = async e => {
+        try {
+            const data = new Uint8Array(e.target.result);
+            const workbook = XLSX.read(data, { type: 'array' });
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            let added = 0;
+            for (let i = 1; i < rows.length; i++) {
+                const cols = rows[i];
+                if (!cols || !cols[0]) continue;
+                const name = String(cols[0]).trim();
+                const phone = cols[1] ? String(cols[1]).trim() : '';
+                let payDate = cols[2] ? String(cols[2]).trim() : new Date().toISOString().slice(0, 10);
+                if (/^\d+(\.\d+)?$/.test(payDate)) {
+                    const d = XLSX.SSF.parse_date_code(parseFloat(payDate));
+                    if (d) payDate = d.y + '-' + String(d.m).padStart(2,'0') + '-' + String(d.d).padStart(2,'0');
+                }
+                const id = Date.now() + i;
+                const qrCode = 'GYM-' + id + '-' + name.split(' ')[0].toUpperCase().slice(0, 4);
+                clients.push({ id, name, phone, payDate, lastVisit: new Date().toISOString().slice(0, 10), qrCode });
+                added++;
+            }
+            try { await save('clients', clients); } catch (err) { alert('Импорт прочитан, но не сохранён в Firebase: ' + err.message); return; }
+            alert('Импортировано из Excel: ' + added);
+        } catch (err) {
+            alert('Ошибка чтения Excel: ' + err.message);
+        }
+    };
+    reader.readAsArrayBuffer(file);
+}
+
+function doPrint(title) {
+    const slogan = PRINT_SLOGANS[Math.floor(Math.random() * PRINT_SLOGANS.length)];
+    let clientName = '';
+    if (currentUser.role === 'member') {
+        clientName = currentUser.clientName || currentUser.name;
+    } else {
+        clientName = title || 'Отчёт';
+    }
+    document.getElementById('print-slogan').textContent = slogan;
+    document.getElementById('print-client').textContent = clientName ? ('Клиент / документ: ' + clientName) : '';
+    const ph = document.getElementById('print-header');
+    ph.style.display = 'block';
+    window.print();
+    setTimeout(() => { ph.style.display = 'none'; }, 500);
+}
+</script>
+</body>
+</html>
