@@ -225,13 +225,14 @@ const firebaseConfig = {
     appId: "YOUR_APP_ID"
 };
 
-const FIREBASE_READY = Boolean(
-    firebaseConfig.apiKey &&
-    firebaseConfig.projectId &&
-    firebaseConfig.appId &&
-    firebaseConfig.apiKey !== 'YOUR_API_KEY' &&
-    firebaseConfig.projectId !== 'YOUR_PROJECT_ID'
-);
+const firebaseConfig = {
+  apiKey: "AIzaSyBArSUIbrJa5Ht8sAVLPSEqf0kOEwMvFu8",
+  authDomain: "gym-6ff42.firebaseapp.com",
+  projectId: "gym-6ff42",
+  storageBucket: "gym-6ff42.firebasestorage.app",
+  messagingSenderId: "1096456155330",
+  appId: "1:1096456155330:web:5bc5507a80c6c2e26a0b5b"
+};
 
 let db = null;
 let auth = null;
