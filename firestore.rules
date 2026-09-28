@@ -1,33 +1,23 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() {
-      return request.auth != null;
-    }
-
+    function signedIn() { return request.auth != null; }
     function userDoc() {
-      return signedIn()
-        ? get(/databases/$(database)/documents/users/$(request.auth.uid))
-        : null;
+      return signedIn() ? get(/databases/$(database)/documents/users/$(request.auth.uid)) : null;
     }
-
     function role() {
       return signedIn() && userDoc().exists ? userDoc().data.role : null;
     }
-
-    function isAdmin() {
-      return role() == 'admin';
-    }
-
-    function isStaff() {
-      return role() == 'admin' || role() == 'reception';
-    }
+    function isAdmin() { return role() == 'admin'; }
+    function isStaff() { return role() == 'admin' || role() == 'reception'; }
 
     match /users/{uid} {
+      // A newly authenticated Google user may create only their own visitor profile.
+      allow create: if signedIn() && uid == request.auth.uid
+                    && request.resource.data.role == 'visitor';
+      // Users can read their own profile; admins can manage all profiles.
       allow read: if signedIn() && (uid == request.auth.uid || isAdmin());
-      allow create: if isAdmin();
-      allow update: if isAdmin();
-      allow delete: if isAdmin();
+      allow update, delete: if isAdmin();
 
       match /private/{docId} {
         allow read, write: if signedIn() && (uid == request.auth.uid || isAdmin());
@@ -35,9 +25,8 @@ service cloud.firestore {
     }
 
     match /gym_data/{docId} {
-      allow read: if signedIn() && (
-        docId == 'inventory' || isStaff()
-      );
+      // Visitors and members only need the public inventory for the store.
+      allow read: if signedIn() && (docId == 'inventory' || isStaff());
       allow create, update, delete: if isStaff();
     }
   }

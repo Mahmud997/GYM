@@ -1,144 +1,42 @@
-# GYM PRO — GitHub Pages + Firebase
+# GYM PRO — GitHub + Firebase
 
-Полностью статическая версия GYM PRO для GitHub Pages с Firebase Authentication (Google) и Cloud Firestore.
+## Логика входа и ролей
 
-## Что исправлено
+1. Пользователь входит через Google.
+2. Если его документа `users/{UID}` ещё нет, приложение автоматически создаёт его с ролью **visitor (Посетитель)**.
+3. Посетитель не получает доступ к админским данным и видит только экран ожидания роли и витрину.
+4. Администратор открывает **Пользователи и роли** и назначает роль:
+   - Посетитель
+   - Клиент
+   - Ресепшен
+   - Администратор
+5. При назначении **Клиент** администратор выбирает конкретного клиента. В профиль пользователя записываются `clientId` и данные клиента.
+6. После назначения пользователь выходит и входит снова, либо обновляет сессию, чтобы получить новые права.
 
-- Убран тестовый вход по ролям — роль больше не задаётся кнопкой на клиенте.
-- Google Authentication восстанавливает сессию автоматически.
-- Роль берётся из `users/{uid}.role` в Firestore.
-- Посетитель получает только свой профиль, а не общий список клиентов.
-- Метрики и карточка лояльности посетителя хранятся в `users/{uid}/private/...`.
-- Общие данные склада/клиентов/активности хранятся в `gym_data`.
-- Firestore Rules ограничивают запись по ролям.
-- Продление абонемента теперь действительно меняет дату, а не показывает фиктивный alert.
-- Добавлены проверки цены, остатка и количества товара.
-- Убрана случайная генерация фиктивной статистики при первом запуске.
-- Excel-импорт сохраняется в Firestore.
-- Код проверен на синтаксические ошибки JavaScript.
+## Firebase
 
-## 1. Создайте Firebase-проект
-
-1. Откройте Firebase Console.
-2. Создайте проект.
-3. Добавьте Web App.
-4. Скопируйте `firebaseConfig`.
-5. Включите **Authentication → Sign-in method → Google**.
-6. Создайте **Cloud Firestore Database**.
-
-## 2. Вставьте Firebase config
-
-Откройте `index.html` и найдите:
-
-```js
-const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT.firebaseapp.com",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_PROJECT.appspot.com",
-    messagingSenderId: "YOUR_SENDER_ID",
-    appId: "YOUR_APP_ID"
-};
-```
-
-Замените значения на данные из Firebase Web App.
-
-Важно: Firebase Web config не является секретным паролем. Защита данных выполняется Firestore Rules.
-
-## 3. Опубликуйте Firestore Rules
-
-В Firebase Console откройте Firestore → Rules и вставьте содержимое `firestore.rules`.
-
-Или при установленном Firebase CLI:
-
-```bash
-firebase deploy --only firestore:rules
-```
-
-## 4. Создайте первого администратора
-
-Сначала войдите через Google, чтобы узнать UID пользователя (Firebase Authentication → Users).
-
-Затем в Firestore создайте документ:
-
-**Коллекция:** `users`
-
-**Document ID:** UID пользователя из Authentication
-
-Поля:
-
-```text
-role: "admin"
-```
-
-После этого администратор сможет входить в приложение.
-
-## 5. Создайте ресепшен
-
-Для Google-аккаунта сотрудника создайте:
-
-`users/{UID}`
-
-```text
-role: "reception"
-```
-
-## 6. Создайте посетителя
-
-Для Google-аккаунта посетителя создайте:
-
-`users/{UID}`
-
-```text
-role: "member"
-clientId: 1
-client: {
-  name: "Алексей Смирнов",
-  phone: "+7 701 111 2233",
-  payDate: "2026-10-15",
-  lastVisit: "2026-09-20",
-  qrCode: "GYM-1-ALEX"
-}
-```
-
-`clientId` должен соответствовать ID клиента, созданного администратором/ресепшеном.
-
-## 7. GitHub Pages
-
-1. Создайте GitHub repository.
-2. Загрузите `index.html`, `firestore.rules`, `firebase.json`, `.gitignore` и `README.md`.
-3. GitHub → Settings → Pages.
-4. Source: **Deploy from a branch**.
-5. Выберите `main` и `/root`.
-6. Откройте полученный адрес.
-
-## 8. Добавьте GitHub Pages в Firebase
-
-В Firebase Authentication → Settings → Authorized domains добавьте домен GitHub Pages, например:
-
-```text
-yourname.github.io
-```
-
-Если приложение находится в репозитории `/gym-pro`, адрес будет вида:
-
-```text
-yourname.github.io/gym-pro/
-```
+1. Создайте проект в Firebase.
+2. Добавьте Web App.
+3. В `index.html` замените значения `YOUR_*` в `firebaseConfig` на конфигурацию вашего Web App.
+4. В Authentication → Sign-in method включите **Google**.
+5. Создайте Firestore Database.
+6. Опубликуйте правила из `firestore.rules`.
+7. Первый аккаунт администратора создайте вручную в Firestore:
+   `users/{UID}` → поле `role`: `admin`.
+   Также можно добавить `name` и `email`.
+8. Добавьте домен GitHub Pages в Firebase Authentication → Settings → Authorized domains.
 
 ## Структура
 
-```text
-GYM-PRO/
-├── index.html
-├── firebase.json
-├── firestore.rules
-├── .gitignore
-└── README.md
-```
+- `index.html` — приложение
+- `firestore.rules` — правила безопасности
+- `firebase.json` — конфигурация Firestore rules
+- `.gitignore` — исключения Git
 
 ## Важно
 
-GitHub Pages здесь используется только для фронтенда. Аутентификация и данные работают через Firebase.
+Не используйте открытые правила Firestore. Роли проверяются серверными правилами Firestore: посетитель/клиент не может читать список всех пользователей или клиентов. Только администратор может назначать роли.
 
-Не делайте Firestore `allow read, write: if true` — это откроет базу всем пользователям интернета.
+## GitHub Pages
+
+Загрузите содержимое этой папки в репозиторий GitHub и включите Settings → Pages → Deploy from branch.

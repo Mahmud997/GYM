@@ -217,12 +217,12 @@
    Security is enforced by Firestore Rules, not by hiding this config.
    ============================================================ */
 const firebaseConfig = {
-  apiKey: "AIzaSyBArSUIbrJa5Ht8sAVLPSEqf0kOEwMvFu8",
-  authDomain: "gym-6ff42.firebaseapp.com",
-  projectId: "gym-6ff42",
-  storageBucket: "gym-6ff42.firebasestorage.app",
-  messagingSenderId: "1096456155330",
-  appId: "1:1096456155330:web:5bc5507a80c6c2e26a0b5b"
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
 };
 
 const FIREBASE_READY = Boolean(
@@ -335,7 +335,7 @@ normalizeClients();
 async function loadFromFirestore() {
     if (!useFirestore || !db) return;
     try {
-        const keys = currentUser?.role === 'member' ? ['inventory'] : ['inventory', 'clients', 'activity'];
+        const keys = ['member', 'visitor'].includes(currentUser?.role) ? ['inventory'] : ['inventory', 'clients', 'activity'];
         for (const key of keys) {
             const snap = await db.collection('gym_data').doc(key).get();
             if (snap.exists && snap.data().data) {
@@ -439,6 +439,7 @@ const NAV = {
     admin: [
         { section: 'Аналитика', items: [
             { id: 'reports', label: 'Отчётность', icon: '◈' },
+            { id: 'users', label: 'Пользователи и роли', icon: '♙' },
         ]},
         { section: 'Клиенты', items: [
             { id: 'clients', label: 'Список клиентов', icon: '◎' },
@@ -468,6 +469,14 @@ const NAV = {
         { section: 'Магазин', items: [
             { id: 'store', label: 'Витрина', icon: '◇' },
         ]},
+    ],
+    visitor: [
+        { section: 'Доступ', items: [
+            { id: 'access-pending', label: 'Мой доступ', icon: '◌' },
+        ]},
+        { section: 'Магазин', items: [
+            { id: 'store', label: 'Витрина', icon: '◇' },
+        ]}
     ],
     member: [
         { section: 'Мой кабинет', items: [
@@ -521,16 +530,24 @@ async function handleAuthUser(firebaseUser) {
     }
 
     try {
-        const profile = await getUserProfile(firebaseUser.uid);
-        if (!profile || !['admin', 'reception', 'member'].includes(profile.role)) {
-            await auth.signOut();
-            showAuthStatus('Для этого Google-аккаунта ещё не назначена роль в Firebase.', true);
-            return;
+        let profile = await getUserProfile(firebaseUser.uid);
+        if (!profile) {
+            profile = {
+                role: 'visitor',
+                name: firebaseUser.displayName || firebaseUser.email || 'Посетитель',
+                email: firebaseUser.email || '',
+                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            };
+            await db.collection('users').doc(firebaseUser.uid).set(profile);
+        }
+        const allowedRoles = ['admin', 'reception', 'member', 'visitor'];
+        if (!allowedRoles.includes(profile.role)) {
+            profile.role = 'visitor';
         }
         currentUser = {
             uid: firebaseUser.uid,
-            name: firebaseUser.displayName || firebaseUser.email || 'Пользователь',
-            email: firebaseUser.email || '',
+            name: profile.name || firebaseUser.displayName || firebaseUser.email || 'Пользователь',
+            email: profile.email || firebaseUser.email || '',
             role: profile.role,
             clientId: profile.clientId || null,
             clientName: profile.clientName || ''
@@ -539,6 +556,10 @@ async function handleAuthUser(firebaseUser) {
         await loadFromFirestore();
         if (currentUser.role === 'admin') {
             await ensureInitialCloudData();
+        }
+
+        if (currentUser.role === 'visitor') {
+            currentUser.clientName = '';
         }
 
         if (currentUser.role === 'member') {
@@ -569,6 +590,92 @@ async function handleAuthUser(firebaseUser) {
 function logout() {
     if (auth) auth.signOut().catch(() => {});
     currentUser = null;
+}
+
+let allUsers = [];
+const ROLE_LABELS = { visitor: 'Посетитель', member: 'Клиент', reception: 'Ресепшен', admin: 'Администратор' };
+
+async function loadUsersTable() {
+    if (currentUser?.role !== 'admin' || !db) return;
+    const tbody = document.getElementById('users-tbody');
+    if (!tbody) return;
+    try {
+        const snap = await db.collection('users').get();
+        allUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        renderUsersTable();
+    } catch (e) {
+        console.error(e);
+        tbody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Не удалось загрузить пользователей: ${escapeHtml(e.message || 'ошибка')}</td></tr>`;
+    }
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function filterUsers() { renderUsersTable(); }
+function renderUsersTable() {
+    const tbody = document.getElementById('users-tbody');
+    if (!tbody) return;
+    const q = (document.getElementById('users-search')?.value || '').toLowerCase().trim();
+    const list = allUsers.filter(u => !q || String(u.name || '').toLowerCase().includes(q) || String(u.email || '').toLowerCase().includes(q));
+    tbody.innerHTML = list.length ? list.map(u => `
+        <tr>
+            <td><b>${escapeHtml(u.name || 'Без имени')}</b><br><small style="color:var(--text-muted)">${escapeHtml(u.id)}</small></td>
+            <td>${escapeHtml(u.email || '')}</td>
+            <td><span class="tag tag-ok">${ROLE_LABELS[u.role] || 'Посетитель'}</span></td>
+            <td>
+                <select class="form-control" id="role-${u.id}" onchange="toggleClientSelect('${u.id}')">
+                    ${Object.entries(ROLE_LABELS).map(([r,label]) => `<option value="${r}" ${((u.role || 'visitor') === r) ? 'selected' : ''}>${label}</option>`).join('')}
+                </select>
+                <select class="form-control" id="client-${u.id}" style="margin-top:6px;display:${u.role === 'member' ? 'block' : 'none'}" onchange="toggleClientSelect('${u.id}')">
+                    <option value="">— выбрать клиента —</option>
+                    ${clients.map(c => `<option value="${c.id}" ${String(u.clientId || '') === String(c.id) ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+                </select>
+            </td>
+            <td><button class="btn btn-primary btn-sm" onclick="assignUserRole('${u.id}')">Сохранить</button></td>
+        </tr>`).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Пользователи не найдены</td></tr>';
+}
+
+function toggleClientSelect(uid) {
+    const role = document.getElementById('role-' + uid)?.value;
+    const select = document.getElementById('client-' + uid);
+    if (select) select.style.display = role === 'member' ? 'block' : 'none';
+}
+
+async function assignUserRole(uid) {
+    if (currentUser?.role !== 'admin' || !db || !uid) return;
+    const select = document.getElementById('role-' + uid);
+    const role = select?.value;
+    if (!['visitor','member','reception','admin'].includes(role)) return;
+    const target = allUsers.find(u => u.id === uid);
+    if (!target) return;
+    if (uid === currentUser.uid && role !== 'admin') {
+        if (!confirm('Вы снимаете роль администратора со своего аккаунта. Продолжить?')) return;
+    }
+    try {
+        const update = { role, updatedAt: firebase.firestore.FieldValue.serverTimestamp(), updatedBy: currentUser.uid };
+        if (role === 'member') {
+            const clientId = document.getElementById('client-' + uid)?.value;
+            const client = clients.find(c => String(c.id) === String(clientId));
+            if (!client) { alert('Для роли «Клиент» выберите клиента из списка.'); return; }
+            update.clientId = client.id;
+            update.client = {
+                name: client.name, phone: client.phone || '', payDate: client.payDate,
+                lastVisit: client.lastVisit || '', qrCode: client.qrCode || ''
+            };
+        } else {
+            update.clientId = firebase.firestore.FieldValue.delete();
+            update.client = firebase.firestore.FieldValue.delete();
+        }
+        await db.collection('users').doc(uid).update(update);
+        alert('Роль назначена.');
+        if (uid === currentUser.uid) { await handleAuthUser(auth.currentUser); }
+        else await loadUsersTable();
+    } catch (e) {
+        console.error(e);
+        alert('Не удалось назначить роль: ' + (e.message || 'ошибка Firebase'));
+    }
 }
 
 function toggleTheme() {
@@ -614,7 +721,7 @@ function showPage(pageId) {
     page.className = 'page active';
     page.id = 'page-' + pageId;
     const map = {
-        reports: tplReports, clients: tplClients, absent: tplAbsent, import: tplImport,
+        reports: tplReports, users: tplUsers, 'access-pending': tplAccessPending, clients: tplClients, absent: tplAbsent, import: tplImport,
         inventory: tplInventory, 'add-product': tplAddProduct, store: tplStore,
         payments: tplPayments, sell: tplSell, 'qr-scan': tplQrScan,
         subscription: tplSubscription, metrics: tplMetrics, loyalty: tplLoyalty, 'my-qr': tplMyQr
@@ -622,6 +729,7 @@ function showPage(pageId) {
     page.innerHTML = (map[pageId] || (() => '<p>Раздел</p>'))();
     main.appendChild(page);
     if (pageId === 'reports') updateAdminReports();
+    if (pageId === 'users') loadUsersTable();
     if (pageId === 'clients') renderClientsTable();
     if (pageId === 'absent') renderAbsentTable();
     if (pageId === 'inventory') renderInventoryTable();
@@ -631,6 +739,33 @@ function showPage(pageId) {
     if (pageId === 'metrics') renderMemberChart();
     if (pageId === 'loyalty') renderLoyaltyCards();
     if (pageId === 'my-qr') renderMyQr();
+}
+
+function tplAccessPending() {
+    return `
+        <div class="page-title">Ваш аккаунт создан</div>
+        <div class="page-desc">Сейчас вы вошли как посетитель.</div>
+        <div class="card">
+            <div class="card-title">Ожидание назначения роли</div>
+            <p style="color:var(--text-muted);line-height:1.7;">Администратор должен назначить вам роль: посетитель, клиент, ресепшен или администратор. После назначения выйдите и войдите снова — доступ обновится автоматически.</p>
+            <div style="margin-top:16px;padding:12px;border-radius:10px;background:var(--primary-soft);">Текущая роль: <b>Посетитель</b></div>
+        </div>`;
+}
+
+function tplUsers() {
+    return `
+        <div class="page-title">Пользователи и роли</div>
+        <div class="page-desc">Новые Google-аккаунты автоматически создаются как посетители. Только администратор назначает рабочую роль.</div>
+        <div class="card">
+            <div class="toolbar no-print">
+                <div class="search-box"><span class="search-icon">⌕</span><input id="users-search" class="form-control" placeholder="Имя или email..." oninput="filterUsers()"></div>
+                <button class="btn btn-outline btn-sm" onclick="loadUsersTable()">Обновить</button>
+            </div>
+            <div class="table-wrap"><table>
+                <thead><tr><th>Пользователь</th><th>Email</th><th>Текущая роль</th><th>Назначить</th><th></th></tr></thead>
+                <tbody id="users-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Загрузка...</td></tr></tbody>
+            </table></div>
+        </div>`;
 }
 
 function tplReports() {
