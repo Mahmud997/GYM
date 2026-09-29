@@ -10,6 +10,7 @@ service cloud.firestore {
       return signedIn() &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin','reception'];
     }
+    function isStaff() { return isReception(); }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
 
     match /users/{uid} {
@@ -19,15 +20,16 @@ service cloud.firestore {
     }
 
     match /usersByEmail/{email} {
-      allow read: if signedIn();
+      // Path-id compare works when the document does not exist yet (resource is null).
+      // Emails are stored lowercased; token email is normalized the same way on the client.
+      allow read: if isAdmin() || (signedIn() && request.auth.token.email.lower() == email);
       allow create, update, delete: if isAdmin();
     }
 
     match /clients/{id} {
-      allow read: if signedIn() && (isAdmin() || isReception() ||
-        resource.data.uid == request.auth.uid);
-      allow create, update: if signedIn() && (isAdmin() || isReception() ||
-        request.resource.data.uid == request.auth.uid);
+      allow read: if signedIn() && (isStaff() || resource.data.uid == request.auth.uid);
+      allow create: if signedIn() && (isStaff() || request.resource.data.uid == request.auth.uid);
+      allow update: if signedIn() && (isStaff() || resource.data.uid == request.auth.uid);
       allow delete: if isAdmin();
     }
 
@@ -41,16 +43,35 @@ service cloud.firestore {
     }
 
     match /assignments/{id} {
-      allow read: if signedIn() && (isAdmin() || isReception() ||
-        resource.data.clientUid == request.auth.uid);
+      allow read: if signedIn() && (isStaff() || resource.data.clientUid == request.auth.uid);
       allow create: if isAdmin();
       allow update: if isAdmin() || resource.data.clientUid == request.auth.uid;
       allow delete: if isAdmin();
     }
 
+    match /subscriptions/{id} {
+      allow read: if isStaff() || (signedIn() && resource.data.clientUid == request.auth.uid);
+      allow create: if isStaff();
+      allow update: if isStaff() || (signedIn() && resource.data.clientUid == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    match /visits/{id} {
+      allow read: if isStaff() || (signedIn() && resource.data.clientUid == request.auth.uid);
+      allow create: if isStaff();
+      allow update: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    match /audit/{id} {
+      allow read, create: if isStaff();
+      allow update, delete: if isAdmin();
+    }
+
+    // Legacy aggregate storage is staff-only. New PRO data uses the
+    // dedicated collections above so clients never receive other users' data.
     match /gym_data/{key} {
-      allow read: if signedIn();
-      allow write: if isAdmin() || isReception();
+      allow read, write: if isStaff();
     }
   }
 }

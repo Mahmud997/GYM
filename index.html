@@ -10,6 +10,7 @@
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+    <script src="firebase-config.js"></script>
     <style>
         :root {
             --transition: 0.3s ease;
@@ -228,7 +229,7 @@ const firebaseConfig = window.TURAN_FIREBASE_CONFIG || {
   appId: "1:1096456155330:web:5bc5507a80c6c2e26a0b5b"
 };
 const TURAN_CONFIG = window.TURAN_CONFIG || {
-    adminEmails: [],
+    adminEmails: ["sayremi025@gmail.com"],
     gymName: "TURAN"
 };
 
@@ -243,7 +244,10 @@ try {
         db = firebase.firestore();
         // Firebase сохраняет авторизацию между обновлениями страницы.
         // Выход происходит только через кнопку «Выход».
-        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(e => console.warn('Auth persistence', e));
+        // Ждём установки LOCAL persistence до запуска обработчика auth state.
+        // Это исключает ситуацию, когда F5 успевает показать экран входа до восстановления сессии.
+        window.TURAN_AUTH_PERSISTENCE_READY = auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+            .catch(e => { console.warn('Auth persistence', e); });
         useFirestore = true;
     }
 } catch (e) {
@@ -274,7 +278,10 @@ function load(key) {
 }
 function save(key, data) {
     localStorage.setItem(STORE_KEYS[key], JSON.stringify(data));
-    if (useFirestore && db) {
+    // Большие/персональные данные хранятся отдельными Firestore-документами.
+    // Это предотвращает превышение лимита 1 MiB и не создаёт общий снимок всех клиентов.
+    const dedicated = new Set(['clients','profiles','subscriptions','visits','audit']);
+    if (useFirestore && db && !dedicated.has(key)) {
         db.collection('gym_data').doc(key).set({ data, updatedAt: firebase.firestore.FieldValue.serverTimestamp() })
             .catch(e => console.warn('Firestore save failed', e));
     }
@@ -306,7 +313,8 @@ let clients = load('clients') || [
 clients.forEach(c => {
     if (!c.qrCode) c.qrCode = 'GYM-' + c.id + '-' + (c.name.split(' ')[0] || 'USER').toUpperCase().slice(0, 4);
 });
-save('clients', clients);
+// Не отправляем локальные демо-клиенты в Firestore при каждом запуске.
+// Сначала восстанавливаем реальные данные из Firestore, затем сохраняем только изменения пользователя.
 
 function generateDemoActivity() {
     const log = [];
@@ -340,7 +348,8 @@ let appUsers = load('users') || {};
 async function loadFromFirestore() {
     if (!useFirestore || !db) return;
     try {
-        for (const key of Object.keys(STORE_KEYS)) {
+        const legacyKeys = Object.keys(STORE_KEYS).filter(key => !['clients','profiles','subscriptions','visits','audit'].includes(key));
+        for (const key of legacyKeys) {
             const snap = await db.collection('gym_data').doc(key).get();
             if (snap.exists && snap.data().data) {
                 const d = snap.data().data;
@@ -375,6 +384,10 @@ function isClientProfileComplete(clientId) {
     const c = getClientById(clientId) || {};
     return !!((p.gender || c.gender) && (p.weight || c.weight) && (p.goal || c.goal) && c.phone);
 }
+
+let subscriptions = load('subscriptions') || [];
+let visits = load('visits') || [];
+let auditLog = load('audit') || [];
 
 let currentUser = null;
 const PAGE_SIZE = 20; // 20 клиентов на страницу — удобно для 525+ записей
@@ -459,6 +472,21 @@ async function ensureGoogleClient(user) {
         (x.email || '').toLowerCase() === email
     );
 
+    // Всегда проверяем Firebase перед созданием новой карточки, чтобы F5,
+    // очистка localStorage или вход с другого устройства не создавали дубликат.
+    if (!c) {
+        try {
+            const snap = await db.collection('clients').where('uid', '==', user.uid).limit(1).get();
+            if (!snap.empty) {
+                const d = snap.docs[0];
+                c = { id: d.id, ...d.data() };
+                clients = clients.filter(x => String(x.id) !== String(c.id));
+                clients.push(c);
+                localStorage.setItem(STORE_KEYS.clients, JSON.stringify(clients));
+            }
+        } catch (e) { console.warn('Find Google client', e); }
+    }
+
     if (!c) {
         const id = 'c_' + user.uid;
         c = {
@@ -519,9 +547,6 @@ async function getUserRole(user, userDoc) {
 
 async function syncGoogleUser(user, openApp = true) {
     if (!user || !db) return;
-
-    await loadFromFirestore();
-    await loadTuranCollections();
 
     const email = (user.email || '').toLowerCase();
     let userDoc = {};
@@ -1420,7 +1445,7 @@ async function saveClientOnboarding() {
     save('profiles', clientProfiles);
     if (useFirestore) {
         await fsSet('clients', cid, c);
-        // profiles остаётся в gym_data и синхронизируется через save().
+        // Основные данные профиля находятся в документе клиента.
     }
 
     currentUser.clientName = name;
@@ -1478,7 +1503,7 @@ async function saveClientProfile() {
 }
 
 
-function processQrScan() {
+async function processQrScan() {
     const code = (document.getElementById('qr-input')?.value || '').trim().toUpperCase();
     const resultEl = document.getElementById('qr-result');
     if (!code) {
@@ -1490,9 +1515,42 @@ function processQrScan() {
         if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Клиент не найден</span>';
         return;
     }
-    const today = new Date().toISOString().slice(0, 10);
+    const s = getSubscription(client.id);
+    if (!s) {
+        if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Нет действующего абонемента</span>';
+        return;
+    }
+    const st = subscriptionStatus(s);
+    if (st[0] === 'Истёк') {
+        if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Абонемент истёк</span>';
+        return;
+    }
+    if (!s.unlimited && Number(s.remaining) <= 0) {
+        if (resultEl) resultEl.innerHTML = '<span class="tag tag-danger">Посещения закончились</span>';
+        return;
+    }
+    const today = todayISO();
+    const v = {
+        id: uid('visit'),
+        clientId: client.id,
+        clientUid: client.uid || '',
+        clientName: client.name,
+        date: today,
+        dateTime: new Date().toISOString(),
+        createdBy: currentUser?.uid || '',
+        source: 'qr'
+    };
+    visits.unshift(v);
+    if (!s.unlimited) s.remaining = Math.max(0, Number(s.remaining) - 1);
     client.lastVisit = today;
+    save('visits', visits);
+    save('subscriptions', subscriptions);
     save('clients', clients);
+    if (useFirestore) {
+        await fsSet('visits', v.id, v);
+        if (s.id) await fsSet('subscriptions', s.id, s);
+        await fsSet('clients', String(client.id), client);
+    }
     let entry = activityLog.find(a => a.date === today);
     if (!entry) {
         entry = { date: today, visits: 0, sales: 0, revenue: 0 };
@@ -1505,11 +1563,13 @@ function processQrScan() {
     if (filled < 15) filled += 1;
     loyaltyMap[cid] = filled;
     save('loyalty', loyaltyMap);
+    logAction('QR-посещение', `${client.name} — ${v.dateTime}`);
+    const remainTxt = s.unlimited ? '∞' : String(s.remaining ?? '—');
     if (resultEl) {
         resultEl.innerHTML = `
             <span class="tag tag-ok">Посещение засчитано</span>
-            <div style="margin-top:8px;"><b>${client.name}</b></div>
-            <div style="color:var(--text-muted);font-size:0.9rem;">Карточек: ${filled} / 15</div>`;
+            <div style="margin-top:8px;"><b>${esc(client.name)}</b></div>
+            <div style="color:var(--text-muted);font-size:0.9rem;">Карточек: ${filled} / 15 · Остаток: ${remainTxt}</div>`;
     }
     document.getElementById('qr-input').value = '';
 }
@@ -1529,7 +1589,9 @@ function renderLoyaltyCards() {
 }
 
 function renderMyQr() {
-    const code = currentUser.qrCode || 'GYM-MEMBER';
+    const me = getClientById(currentUser?.clientId) || clients.find(c => c.uid === currentUser?.uid);
+    const code = (currentUser && currentUser.qrCode) || (me && me.qrCode) || ('TURAN-' + (currentUser?.clientId || currentUser?.uid || 'MEMBER'));
+    if (currentUser && !currentUser.qrCode && me && me.qrCode) currentUser.qrCode = me.qrCode;
     const label = document.getElementById('qr-code-label');
     if (label) label.textContent = code;
     const canvas = document.getElementById('qr-canvas');
@@ -1860,7 +1922,7 @@ function importExcel() {
     const file = document.getElementById('excel-file-input')?.files[0];
     if (!file) { alert('Выберите файл Excel (.xlsx)'); return; }
     const reader = new FileReader();
-    reader.onload = e => {
+    reader.onload = async e => {
         try {
             const data = new Uint8Array(e.target.result);
             const workbook = XLSX.read(data, { type: 'array' });
@@ -1879,7 +1941,9 @@ function importExcel() {
                 }
                 const id = Date.now() + i;
                 const qrCode = 'GYM-' + id + '-' + name.split(' ')[0].toUpperCase().slice(0, 4);
-                clients.push({ id, name, phone, payDate, lastVisit: new Date().toISOString().slice(0, 10), qrCode });
+                const client = { id, name, phone, payDate, lastVisit: new Date().toISOString().slice(0, 10), qrCode };
+                clients.push(client);
+                if (useFirestore) await fsSet('clients', String(id), client);
                 added++;
             }
             save('clients', clients);
@@ -1909,6 +1973,12 @@ function doPrint(title) {
 
 if (auth) {
     auth.onAuthStateChanged(async user => {
+        // Важно: сначала дождаться LOCAL persistence, чтобы обновление страницы
+        // не выглядело как выход из аккаунта.
+        try {
+            if (window.TURAN_AUTH_PERSISTENCE_READY) await window.TURAN_AUTH_PERSISTENCE_READY;
+        } catch (_) {}
+
         if (roleUnsubscribe) {
             try { roleUnsubscribe(); } catch (_) {}
             roleUnsubscribe = null;
@@ -1923,6 +1993,13 @@ if (auth) {
 
         try {
             await syncGoogleUser(user, true);
+            if (currentUser?.role === 'admin' || currentUser?.role === 'reception') {
+                await loadFromFirestore();
+                await loadTuranCollections();
+            } else {
+                // Клиент получает только свою карточку и свои PRO-данные.
+                await loadTuranCollections();
+            }
             await loadProData();
 
             // Живое обновление роли. Администратор меняет роль —
@@ -1963,6 +2040,12 @@ if (auth) {
                 if (newRole === 'admin' || newRole === 'reception') {
                     await loadFromFirestore();
                     await loadTuranCollections();
+                    await loadProData();
+                } else {
+                    // После понижения роли очищаем загруженные общие данные из памяти.
+                    // Клиент снова получает только свою карточку и свои записи.
+                    await loadTuranCollections();
+                    await loadProData();
                 }
             });
         } catch (e) {
@@ -1991,7 +2074,7 @@ function subscriptionStatus(s){
 }
 function logAction(action, details){
     const item={id:uid('log'), action, details:details||'', byUid:currentUser?.uid||'', byName:currentUser?.name||'', dateTime:new Date().toISOString()};
-    auditLog.unshift(item); auditLog=auditLog.slice(0,1000); save('audit',auditLog); return item;
+    auditLog.unshift(item); auditLog=auditLog.slice(0,1000); save('audit',auditLog); if(useFirestore&&db&&(currentUser?.role==='admin'||currentUser?.role==='reception')) fsSet('audit',item.id,item); return item;
 }
 
 function tplDashboard(){
@@ -2028,15 +2111,18 @@ function renderSubscriptions(){
 function quickExtendSubscription(cid){document.getElementById('sub-client').value=cid;document.getElementById('sub-end').focus();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});}
 async function saveSubscription(){
  const cid=document.getElementById('sub-client')?.value, c=getClientById(cid), start=document.getElementById('sub-start')?.value, end=document.getElementById('sub-end')?.value; if(!c||!start||!end||end<start)return alert('Укажите клиента и корректные даты.');
+ const old= getSubscription(cid);
  const limit=parseInt(document.getElementById('sub-limit')?.value||0,10)||0; const item={id:uid('sub'),clientId:cid,clientUid:c.uid||'',tariff:document.getElementById('sub-tariff')?.value.trim()||'Абонемент',startDate:start,endDate:end,visitLimit:limit,remaining:limit,unlimited:limit===0,price:parseFloat(document.getElementById('sub-price')?.value||0)||0,status:'active',createdAt:new Date().toISOString(),createdBy:currentUser?.uid||''};
- subscriptions=subscriptions.filter(x=>String(x.clientId)!==String(cid)||x.status==='cancelled'); subscriptions.unshift(item); save('subscriptions',subscriptions); await fsSet('gym_data','subscriptions',{data:subscriptions}); logAction('Создан абонемент',`${c.name} — ${item.tariff} до ${item.endDate}`); alert('Абонемент сохранён.'); renderSubscriptions();
+ subscriptions=subscriptions.filter(x=>String(x.clientId)!==String(cid)||x.status==='cancelled'); subscriptions.unshift(item); save('subscriptions',subscriptions);
+ if(useFirestore){ if(old?.id) await fsDelete('subscriptions',old.id); await fsSet('subscriptions',item.id,item); }
+ logAction('Создан абонемент',`${c.name} — ${item.tariff} до ${item.endDate}`); alert('Абонемент сохранён.'); renderSubscriptions();
 }
 
 function tplVisits(){return `<div class="page-title">Посещения</div><div class="page-desc">Регистрация входа клиента и история посещений</div><div class="card"><div class="toolbar"><div class="search-box"><span class="search-icon">⌕</span><input id="visit-search" class="form-control" placeholder="ФИО или телефон..." oninput="renderVisits()"></div><button class="btn btn-primary" onclick="registerVisitPrompt()">+ Отметить посещение</button><button class="btn btn-outline" onclick="downloadVisitsExcel()">Excel</button></div><div class="table-wrap"><table><thead><tr><th>Дата</th><th>Время</th><th>Клиент</th><th>Абонемент</th><th>Остаток</th></tr></thead><tbody id="visits-tbody"></tbody></table></div><div class="pagination" id="visits-pagination"></div></div>`;}
 function renderVisits(memberOnly=false){const body=document.getElementById('visits-tbody');if(!body)return;const q=(document.getElementById('visit-search')?.value||'').toLowerCase();let arr=visits.slice().sort((a,b)=>String(b.dateTime).localeCompare(String(a.dateTime)));if(memberOnly)arr=arr.filter(v=>String(v.clientUid)===String(currentUser?.uid)||String(v.clientId)===String(currentUser?.clientId));arr=arr.filter(v=>{const c=getClientById(v.clientId);return !q||(c?.name||v.clientName||'').toLowerCase().includes(q)||(c?.phone||'').includes(q)});const total=arr.length;pages.visits=pages.visits||1;const tp=Math.max(1,Math.ceil(total/PAGE_SIZE));if(pages.visits>tp)pages.visits=tp;const slice=arr.slice((pages.visits-1)*PAGE_SIZE,pages.visits*PAGE_SIZE);body.innerHTML=slice.map(v=>{const c=getClientById(v.clientId),s=getSubscription(v.clientId);return `<tr><td>${esc(v.date)}</td><td>${esc(new Date(v.dateTime||v.date).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}))}</td><td><b>${esc(c?.name||v.clientName||'—')}</b></td><td>${esc(s?.tariff||'—')}</td><td>${s?.unlimited?'∞':(s?.remaining??'—')}</td></tr>`}).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Нет посещений</td></tr>';renderPagination('visits-pagination',total,pages.visits,p=>{pages.visits=p;renderVisits(memberOnly);});}
 async function registerVisitPrompt(){
  if(currentUser?.role==='member')return; const q=prompt('Введите ФИО или телефон клиента:');if(!q)return;const lc=q.toLowerCase();const c=clients.find(x=>(x.name||'').toLowerCase().includes(lc)||(x.phone||'').includes(q));if(!c)return alert('Клиент не найден.');const s=getSubscription(c.id);if(!s)return alert('У клиента нет действующего абонемента.');const st=subscriptionStatus(s);if(st[0]==='Истёк')return alert('Абонемент истёк.');if(!s.unlimited&&Number(s.remaining)<=0)return alert('Посещения закончились.');
- const v={id:uid('visit'),clientId:c.id,clientUid:c.uid||'',clientName:c.name,date:todayISO(),dateTime:new Date().toISOString(),createdBy:currentUser?.uid||''};visits.unshift(v);if(!s.unlimited)s.remaining=Math.max(0,Number(s.remaining)-1);c.lastVisit=v.date;save('visits',visits);save('subscriptions',subscriptions);save('clients',clients);await fsSet('gym_data','visits',{data:visits});await fsSet('gym_data','subscriptions',{data:subscriptions});await fsSet('clients',String(c.id),c);logAction('Посещение',`${c.name} — ${v.dateTime}`);alert(`Посещение отмечено: ${c.name}`);renderVisits();}
+ const v={id:uid('visit'),clientId:c.id,clientUid:c.uid||'',clientName:c.name,date:todayISO(),dateTime:new Date().toISOString(),createdBy:currentUser?.uid||''};visits.unshift(v);if(!s.unlimited)s.remaining=Math.max(0,Number(s.remaining)-1);c.lastVisit=v.date;save('visits',visits);save('subscriptions',subscriptions);save('clients',clients);await fsSet('visits',v.id,v);await fsSet('subscriptions',s.id,s);await fsSet('clients',String(c.id),c);logAction('Посещение',`${c.name} — ${v.dateTime}`);alert(`Посещение отмечено: ${c.name}`);renderVisits();}
 
 function tplAudit(){return `<div class="page-title">Журнал действий</div><div class="page-desc">Последние действия сотрудников и системы</div><div class="card"><div class="table-wrap"><table><thead><tr><th>Дата</th><th>Пользователь</th><th>Действие</th><th>Подробности</th></tr></thead><tbody id="audit-tbody"></tbody></table></div><div class="pagination" id="audit-pagination"></div></div>`;}
 function renderAudit(){const b=document.getElementById('audit-tbody');if(!b)return;const total=auditLog.length;pages.audit=pages.audit||1;const tp=Math.max(1,Math.ceil(total/PAGE_SIZE));if(pages.audit>tp)pages.audit=tp;const a=auditLog.slice((pages.audit-1)*PAGE_SIZE,pages.audit*PAGE_SIZE);b.innerHTML=a.map(x=>`<tr><td>${esc(new Date(x.dateTime).toLocaleString('ru-RU'))}</td><td>${esc(x.byName||x.byUid||'Система')}</td><td>${esc(x.action)}</td><td>${esc(x.details)}</td></tr>`).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Журнал пуст</td></tr>';renderPagination('audit-pagination',total,pages.audit,p=>{pages.audit=p;renderAudit();});}
@@ -2046,14 +2132,35 @@ function tplMyVisits(){return `<div class="page-title">Мои посещения
 function downloadSubscriptionsExcel(){const rows=[['Клиент','Телефон','Тариф','Начало','Окончание','Остаток','Статус'],...clients.map(c=>{const s=getSubscription(c.id),st=subscriptionStatus(s)[0];return[c.name,c.phone||'',s?.tariff||'',s?.startDate||'',s?.endDate||'',s?.unlimited?'Безлимит':s?.remaining??'',st]})];const ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Абонементы');XLSX.writeFile(wb,'gym_subscriptions.xlsx');}
 function downloadVisitsExcel(){const rows=[['Дата','Время','Клиент','Телефон','Тариф'],...visits.map(v=>{const c=getClientById(v.clientId),s=getSubscription(v.clientId);return[v.date,new Date(v.dateTime||v.date).toLocaleTimeString('ru-RU'),c?.name||v.clientName||'',c?.phone||'',s?.tariff||'']})];const ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Посещения');XLSX.writeFile(wb,'gym_visits.xlsx');}
 
-// Дополнительные страницы доступны без изменения старых разделов.
-NAV.reception[0].items.splice(1,0,{id:'subscriptions',label:'Абонементы',icon:'◈'},{id:'visits',label:'Посещения',icon:'✓'});
-NAV.member[0].items.splice(1,0,{id:'my-visits',label:'Мои посещения',icon:'✓'});
+// NAV уже содержит subscriptions/visits/my-visits — дублирующие splice убраны.
 
 // Загружаем новые коллекции из Firestore при восстановлении сессии.
 async function loadProData(){
- if(!useFirestore||!db)return;
- for(const key of ['subscriptions','visits','audit']){try{const snap=await db.collection('gym_data').doc(key).get();if(snap.exists&&snap.data().data){if(key==='subscriptions')subscriptions=snap.data().data;if(key==='visits')visits=snap.data().data;if(key==='audit')auditLog=snap.data().data;localStorage.setItem(STORE_KEYS[key],JSON.stringify(snap.data().data));}}catch(e){console.warn('Load '+key,e);}}
+ if(!useFirestore||!db||!auth?.currentUser)return;
+ const isMember=currentUser?.role==='member';
+ try {
+   if(isMember){
+     const uid=auth.currentUser.uid;
+     const [subSnap,visitSnap]=await Promise.all([
+       db.collection('subscriptions').where('clientUid','==',uid).get(),
+       db.collection('visits').where('clientUid','==',uid).limit(500).get()
+     ]);
+     subscriptions=subSnap.docs.map(d=>({id:d.id,...d.data()}));
+     visits=visitSnap.docs.map(d=>({id:d.id,...d.data()}));
+   } else {
+     const [subSnap,visitSnap,auditSnap]=await Promise.all([
+       db.collection('subscriptions').orderBy('createdAt','desc').limit(5000).get(),
+       db.collection('visits').orderBy('dateTime','desc').limit(5000).get(),
+       db.collection('audit').orderBy('dateTime','desc').limit(1000).get()
+     ]);
+     subscriptions=subSnap.docs.map(d=>({id:d.id,...d.data()}));
+     visits=visitSnap.docs.map(d=>({id:d.id,...d.data()}));
+     auditLog=auditSnap.docs.map(d=>({id:d.id,...d.data()}));
+   }
+   localStorage.setItem(STORE_KEYS.subscriptions,JSON.stringify(subscriptions));
+   localStorage.setItem(STORE_KEYS.visits,JSON.stringify(visits));
+   localStorage.setItem(STORE_KEYS.audit,JSON.stringify(auditLog));
+ } catch(e) { console.warn('Load PRO data failed',e); }
 }
 
 </script>
