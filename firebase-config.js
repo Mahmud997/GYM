@@ -3,12 +3,12 @@
 // 2) Copy its config here.
 // 3) Add the Google accounts that should start as admin to adminEmails.
 window.TURAN_FIREBASE_CONFIG = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.firebasestorage.app",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+   apiKey: "AIzaSyBArSUIbrJa5Ht8sAVLPSEqf0kOEwMvFu8",
+  authDomain: "gym-6ff42.firebaseapp.com",
+  projectId: "gym-6ff42",
+  storageBucket: "gym-6ff42.firebasestorage.app",
+  messagingSenderId: "1096456155330",
+  appId: "1:1096456155330:web:5bc5507a80c6c2e26a0b5b"
 };
 
 window.TURAN_CONFIG = {
