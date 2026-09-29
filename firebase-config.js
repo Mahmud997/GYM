@@ -14,6 +14,6 @@ window.TURAN_FIREBASE_CONFIG = {
 window.TURAN_CONFIG = {
   gymName: "TURAN",
   adminEmails: [
-    // "owner@gmail.com"
+    // "sayremi025@gmail.com"
   ]
 };
