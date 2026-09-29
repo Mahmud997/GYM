@@ -2,32 +2,55 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function userDoc() {
-      return signedIn() ? get(/databases/$(database)/documents/users/$(request.auth.uid)) : null;
+    function isAdmin() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
     }
-    function role() {
-      return signedIn() && userDoc().exists ? userDoc().data.role : null;
+    function isReception() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin','reception'];
     }
-    function isAdmin() { return role() == 'admin'; }
-    function isStaff() { return role() == 'admin' || role() == 'reception'; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
 
     match /users/{uid} {
-      // A newly authenticated Google user may create only their own visitor profile.
-      allow create: if signedIn() && uid == request.auth.uid
-                    && request.resource.data.role == 'visitor';
-      // Users can read their own profile; admins can manage all profiles.
-      allow read: if signedIn() && (uid == request.auth.uid || isAdmin());
-      allow update, delete: if isAdmin();
-
-      match /private/{docId} {
-        allow read, write: if signedIn() && (uid == request.auth.uid || isAdmin());
-      }
+      allow read: if signedIn() && (isAdmin() || isOwner(uid));
+      allow create, update: if signedIn() && (isAdmin() || isOwner(uid));
+      allow delete: if isAdmin();
     }
 
-    match /gym_data/{docId} {
-      // Visitors and members only need the public inventory for the store.
-      allow read: if signedIn() && (docId == 'inventory' || isStaff());
-      allow create, update, delete: if isStaff();
+    match /usersByEmail/{email} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /clients/{id} {
+      allow read: if signedIn() && (isAdmin() || isReception() ||
+        resource.data.uid == request.auth.uid);
+      allow create, update: if signedIn() && (isAdmin() || isReception() ||
+        request.resource.data.uid == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    match /trainers/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+    match /trainerCategories/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /assignments/{id} {
+      allow read: if signedIn() && (isAdmin() || isReception() ||
+        resource.data.clientUid == request.auth.uid);
+      allow create: if isAdmin();
+      allow update: if isAdmin() || resource.data.clientUid == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /gym_data/{key} {
+      allow read: if signedIn();
+      allow write: if isAdmin() || isReception();
     }
   }
 }
