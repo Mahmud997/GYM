@@ -241,6 +241,9 @@ try {
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         auth = firebase.auth();
         db = firebase.firestore();
+        // Firebase сохраняет авторизацию между обновлениями страницы.
+        // Выход происходит только через кнопку «Выход».
+        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(e => console.warn('Auth persistence', e));
         useFirestore = true;
     }
 } catch (e) {
@@ -257,7 +260,10 @@ const STORE_KEYS = {
     trainers: 'turan_trainers',
     trainerCategories: 'turan_trainer_categories',
     assignments: 'turan_assignments',
-    users: 'turan_users'
+    users: 'turan_users',
+    subscriptions: 'turan_subscriptions',
+    visits: 'turan_visits',
+    audit: 'turan_audit'
 };
 
 function load(key) {
@@ -348,6 +354,9 @@ async function loadFromFirestore() {
                 if (key === 'trainerCategories') trainerCategories = d;
                 if (key === 'assignments') assignments = d;
                 if (key === 'users') appUsers = d;
+                if (key === 'subscriptions') subscriptions = d;
+                if (key === 'visits') visits = d;
+                if (key === 'audit') auditLog = d;
                 localStorage.setItem(STORE_KEYS[key], JSON.stringify(d));
             }
         }
@@ -362,13 +371,14 @@ function roleLabel(role) {
 }
 
 function isClientProfileComplete(clientId) {
-    const p = clientProfiles[String(clientId)];
-    return !!(p && p.gender && p.weight && p.goal);
+    const p = clientProfiles[String(clientId)] || {};
+    const c = getClientById(clientId) || {};
+    return !!((p.gender || c.gender) && (p.weight || c.weight) && (p.goal || c.goal) && c.phone);
 }
 
 let currentUser = null;
-const PAGE_SIZE = 5;
-const pages = { clients: 1, inventory: 1, absent: 1, payments: 1 };
+const PAGE_SIZE = 20; // 20 клиентов на страницу — удобно для 525+ записей
+const pages = { clients: 1, inventory: 1, absent: 1, payments: 1, subscriptions: 1, visits: 1, audit: 1 };
 let progressChart = null, visitsChart = null, revenueChart = null;
 
 const PRINT_SLOGANS = [
@@ -382,11 +392,15 @@ const PRINT_SLOGANS = [
 const NAV = {
     admin: [
         { section: 'Панель', items: [
+            { id: 'dashboard', label: 'Dashboard', icon: '▦' },
             { id: 'reports', label: 'Отчётность', icon: '◈' },
-            { id: 'access', label: 'Доступ и роли', icon: '◉' }
+            { id: 'access', label: 'Доступ и роли', icon: '◉' },
+            { id: 'audit', label: 'Журнал действий', icon: '☷' }
         ]},
         { section: 'Клиенты', items: [
             { id: 'clients', label: 'Клиенты', icon: '◎' },
+            { id: 'subscriptions', label: 'Абонементы', icon: '◈' },
+            { id: 'visits', label: 'Посещения', icon: '✓' },
             { id: 'assignments', label: 'Задания клиентам', icon: '✓' },
             { id: 'absent', label: 'Пропускающие', icon: '◌' },
             { id: 'import', label: 'Импорт Excel', icon: '↓' }
@@ -406,7 +420,9 @@ const NAV = {
     reception: [
         { section: 'Клиенты', items: [
             { id: 'clients', label: 'Список клиентов', icon: '◎' },
+            { id: 'subscriptions', label: 'Абонементы', icon: '◈' },
             { id: 'payments', label: 'Платежи', icon: '◎' },
+            { id: 'visits', label: 'Посещения', icon: '✓' },
             { id: 'absent', label: 'Пропускающие', icon: '◌' }
         ]},
         { section: 'Посещения', items: [
@@ -422,6 +438,7 @@ const NAV = {
     member: [
         { section: 'Мой кабинет', items: [
             { id: 'subscription', label: 'Абонемент', icon: '◈' },
+            { id: 'my-visits', label: 'Мои посещения', icon: '✓' },
             { id: 'profile', label: 'Профиль и цели', icon: '◎' },
             { id: 'my-assignments', label: 'Мои задания', icon: '✓' },
             { id: 'metrics', label: 'Метрики', icon: '◎' },
@@ -434,83 +451,175 @@ const NAV = {
     ]
 };
 
+async function ensureGoogleClient(user) {
+    if (!user || !db) return null;
+    const email = (user.email || '').toLowerCase();
+    let c = clients.find(x =>
+        x.uid === user.uid ||
+        (x.email || '').toLowerCase() === email
+    );
+
+    if (!c) {
+        const id = 'c_' + user.uid;
+        c = {
+            id,
+            uid: user.uid,
+            name: user.displayName || email,
+            email,
+            phone: '',
+            birthDate: '',
+            gender: '',
+            weight: '',
+            goal: '',
+            note: '',
+            payDate: '',
+            lastVisit: '',
+            qrCode: 'TURAN-' + id
+        };
+        clients.push(c);
+        save('clients', clients);
+        await fsSet('clients', String(id), c);
+    } else {
+        let changed = false;
+        if (!c.uid) { c.uid = user.uid; changed = true; }
+        if (!c.email) { c.email = email; changed = true; }
+        if (!c.name) { c.name = user.displayName || email; changed = true; }
+        if (!c.qrCode) { c.qrCode = 'TURAN-' + c.id; changed = true; }
+        if (changed) {
+            save('clients', clients);
+            await fsSet('clients', String(c.id), c);
+        }
+    }
+    return c;
+}
+
+async function getUserRole(user, userDoc) {
+    const email = (user.email || '').toLowerCase();
+    let role = 'member';
+
+    // Назначение админа по конфигурации имеет самый высокий приоритет.
+    if (TURAN_CONFIG.adminEmails.map(x => String(x).toLowerCase()).includes(email)) {
+        return 'admin';
+    }
+
+    // Сначала читаем назначение по email. Это позволяет админу менять роль
+    // уже зарегистрированного пользователя без повторного входа.
+    try {
+        const eDoc = await db.collection('usersByEmail').doc(email).get();
+        if (eDoc.exists && eDoc.data().role) role = eDoc.data().role;
+    } catch (_) {}
+
+    if (!role && userDoc && userDoc.role) role = userDoc.role;
+    // Для старых пользователей, у которых usersByEmail ещё не было.
+    if (role === 'member' && userDoc && userDoc.role) {
+        role = userDoc.role;
+    }
+    return role;
+}
+
+async function syncGoogleUser(user, openApp = true) {
+    if (!user || !db) return;
+
+    await loadFromFirestore();
+    await loadTuranCollections();
+
+    const email = (user.email || '').toLowerCase();
+    let userDoc = {};
+    try {
+        const uDoc = await db.collection('users').doc(user.uid).get();
+        if (uDoc.exists) userDoc = uDoc.data() || {};
+    } catch (_) {}
+
+    const role = await getUserRole(user, userDoc);
+    const client = await ensureGoogleClient(user);
+    const clientId = client ? client.id : (userDoc.clientId || null);
+
+    const userData = {
+        uid: user.uid,
+        email,
+        displayName: user.displayName || '',
+        photoURL: user.photoURL || '',
+        role,
+        clientId: clientId || null,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    await db.collection('users').doc(user.uid).set(userData, { merge: true });
+
+    appUsers[email] = {
+        email, role, uid: user.uid,
+        name: user.displayName || email,
+        clientId: clientId || null
+    };
+    saveTuran('users', appUsers);
+
+    if (openApp) {
+        setUserSession({
+            name: user.displayName || email,
+            email, uid: user.uid, role,
+            clientId
+        });
+    }
+
+    return { role, clientId, client };
+}
+
+let roleUnsubscribe = null;
+
 async function loginWithGoogle() {
     if (!auth) {
-        const status=document.getElementById('auth-status');
-        if(status) status.textContent='Firebase не настроен. Откройте firebase-config.js и вставьте данные вашего проекта.';
+        const status = document.getElementById('auth-status');
+        if (status) status.textContent = 'Firebase не настроен. Откройте firebase-config.js и вставьте данные вашего проекта.';
         return;
     }
     const provider = new firebase.auth.GoogleAuthProvider();
-    provider.setCustomParameters({prompt:'select_account'});
+    provider.setCustomParameters({ prompt: 'select_account' });
+
     try {
-        const r = await auth.signInWithPopup(provider);
-        await loadFromFirestore();
-        await loadTuranCollections();
-        const email=(r.user.email||'').toLowerCase();
-        let role='member';
-        let userDoc={};
-        try {
-            const uDoc=await db.collection('users').doc(r.user.uid).get();
-            if(uDoc.exists) userDoc=uDoc.data()||{};
-        } catch(_){}
-        try {
-            const eDoc=await db.collection('usersByEmail').doc(email).get();
-            if(eDoc.exists && eDoc.data().role) role=eDoc.data().role;
-        } catch(_){}
-        if(userDoc.role) role=userDoc.role;
-        if(TURAN_CONFIG.adminEmails.map(x=>String(x).toLowerCase()).includes(email)) role='admin';
-        await db.collection('users').doc(r.user.uid).set({uid:r.user.uid,email,displayName:r.user.displayName||'',photoURL:r.user.photoURL||'',role,updatedAt:firebase.firestore.FieldValue.serverTimestamp()},{merge:true});
-        appUsers[email]={email,role,uid:r.user.uid,name:r.user.displayName||email};
-        saveTuran('users',appUsers);
-        if (role === 'admin' || role === 'reception') {
-            for (const c of clients) {
-                if (c && c.id != null) await fsSet('clients', String(c.id), c);
-            }
-        }
-        let clientId=userDoc.clientId||null;
-        if(role==='member') {
-            let c=clients.find(x=>x.uid===r.user.uid || (x.email||'').toLowerCase()===email);
-            if(!c){
-                const id='c_'+Date.now();
-                c={id,name:r.user.displayName||email,email,phone:'',payDate:new Date().toISOString().slice(0,10),lastVisit:'',qrCode:'TURAN-'+id,uid:r.user.uid};
-                clients.push(c); save('clients',clients); await fsSet('clients',id,c);
-            } else if(!c.uid || c.uid!==r.user.uid) {
-                c.uid=r.user.uid; c.email=email; save('clients',clients); await fsSet('clients',String(c.id),c);
-            }
-            clientId=c.id;
-        }
-        setUserSession({name:r.user.displayName||r.user.email,email,uid:r.user.uid,role,clientId});
-    } catch(e) {
-        const status=document.getElementById('auth-status');
-        if(status) status.textContent='Ошибка входа: '+e.message;
+        await auth.signInWithPopup(provider);
+        // onAuthStateChanged продолжит авторизацию и создаст/обновит карточку клиента.
+    } catch (e) {
+        const status = document.getElementById('auth-status');
+        if (status) status.textContent = 'Ошибка входа: ' + e.message;
     }
 }
 
+
 function setUserSession(user) {
     currentUser = user;
+
     if (user.role === 'member') {
-        const me = clients.find(c => String(c.id) === String(user.clientId) || c.uid === user.uid || (c.email||'').toLowerCase() === (user.email||'').toLowerCase()) || clients[0];
+        const me = clients.find(c =>
+            String(c.id) === String(user.clientId) ||
+            c.uid === user.uid ||
+            (c.email || '').toLowerCase() === (user.email || '').toLowerCase()
+        );
         if (me) {
             currentUser.clientId = me.id;
             currentUser.clientName = me.name;
             currentUser.qrCode = me.qrCode;
         }
     }
+
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app-shell').style.display = 'block';
     document.getElementById('user-name-display').textContent = user.name;
     document.getElementById('user-role-display').textContent = roleLabel(user.role);
     buildSidebar();
-    // Первый вход клиента — подтверждение пола, веса и цели
-    if (user.role === 'member' && !isClientProfileComplete(currentUser.clientId)) {
+
+    if (user.role === 'member' && currentUser.clientId && !isClientProfileComplete(currentUser.clientId)) {
         showPage('onboarding');
-    } else {
+    } else if (NAV[user.role]) {
         showPage(NAV[user.role][0].items[0].id);
     }
 }
 
+
 function logout() {
     currentUser = null;
+    if (roleUnsubscribe) {
+        try { roleUnsubscribe(); } catch (_) {}
+        roleUnsubscribe = null;
+    }
     if (auth) auth.signOut().catch(() => {});
     document.getElementById('auth-screen').style.display = 'flex';
     document.getElementById('app-shell').style.display = 'none';
@@ -561,18 +670,23 @@ function showPage(pageId) {
     page.className = 'page active';
     page.id = 'page-' + pageId;
     const map = {
-        reports: tplReports, clients: tplClients, absent: tplAbsent, import: tplImport,
+        dashboard: tplDashboard, reports: tplReports, clients: tplClients, subscriptions: tplSubscriptions, visits: tplVisits, audit: tplAudit, absent: tplAbsent, import: tplImport,
         inventory: tplInventory, 'add-product': tplAddProduct, store: tplStore,
         payments: tplPayments, sell: tplSell, 'qr-scan': tplQrScan,
-        subscription: tplSubscription, metrics: tplMetrics, loyalty: tplLoyalty, 'my-qr': tplMyQr,
+        subscription: tplSubscription, metrics: tplMetrics, loyalty: tplLoyalty, 'my-qr': tplMyQr, 'my-visits': tplMyVisits,
         onboarding: tplOnboarding, profile: tplProfile,
         assignments: tplAssignments, 'my-assignments': tplMyAssignments,
         trainers: tplTrainers, 'trainer-categories': tplTrainerCategories, access: tplAccess
     };
     page.innerHTML = (map[pageId] || (() => '<p>Раздел</p>'))();
     main.appendChild(page);
+    if (pageId === 'dashboard') renderDashboard();
     if (pageId === 'reports') updateAdminReports();
     if (pageId === 'clients') renderClientsTable();
+    if (pageId === 'subscriptions') renderSubscriptions();
+    if (pageId === 'visits') renderVisits();
+    if (pageId === 'my-visits') renderVisits(true);
+    if (pageId === 'audit') renderAudit();
     if (pageId === 'absent') renderAbsentTable();
     if (pageId === 'inventory') renderInventoryTable();
     if (pageId === 'store') renderStore();
@@ -620,7 +734,10 @@ async function loadTuranCollections() {
             clients = Array.from(byId.values());
             localStorage.setItem(STORE_KEYS.clients, JSON.stringify(clients));
         }
-    } catch(e) { console.warn('Load clients collection', e); }
+    } catch(e) {
+        // У клиента может быть доступ только к собственной карточке — это нормально.
+        console.warn('Load clients collection', e);
+    }
 
     const collections = [
         ['trainers', 'trainers'],
@@ -808,14 +925,56 @@ function tplAccess() {
     <div class="card"><div id="access-users-list"></div></div>`;
 }
 async function setAccessRole() {
-    const email=document.getElementById('access-email')?.value.trim().toLowerCase(), role=document.getElementById('access-role')?.value;
-    if(!email)return alert('Введите email');
-    const item={email,role,updatedAt:new Date().toISOString(),updatedBy:currentUser.uid||''};
-    appUsers[email]=item; saveTuran('users',appUsers);
-    if(useFirestore) { try { await db.collection('usersByEmail').doc(email).set(item,{merge:true}); } catch(e){alert('Ошибка сохранения: '+e.message);return;} }
-    alert('Доступ сохранён. Пользователь должен войти через этот Google-аккаунт.');
-    renderAccessUsers();
+    const email = document.getElementById('access-email')?.value.trim().toLowerCase();
+    const role = document.getElementById('access-role')?.value;
+    if (!email) return alert('Введите email');
+
+    const item = {
+        email, role,
+        updatedAt: new Date().toISOString(),
+        updatedBy: currentUser.uid || ''
+    };
+
+    try {
+        // Главный источник назначения роли — usersByEmail.
+        if (useFirestore && db) {
+            await db.collection('usersByEmail').doc(email).set(item, { merge: true });
+
+            // Если пользователь уже входил, сразу обновляем его users/{uid}.
+            const snap = await db.collection('users')
+                .where('email', '==', email)
+                .limit(1)
+                .get();
+
+            if (!snap.empty) {
+                const target = snap.docs[0];
+                const targetData = target.data() || {};
+                await target.ref.set({
+                    role,
+                    email,
+                    uid: target.id,
+                    clientId: targetData.clientId || null,
+                    roleUpdatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    roleUpdatedBy: currentUser.uid || ''
+                }, { merge: true });
+
+                item.uid = target.id;
+                item.clientId = targetData.clientId || null;
+            }
+        }
+
+        appUsers[email] = item;
+        saveTuran('users', appUsers);
+
+        logAction('Изменение роли', `${email} → ${roleLabel(role)}`);
+        alert('Доступ сохранён. Если пользователь уже вошёл, его роль обновится автоматически.');
+        renderAccessUsers();
+    } catch (e) {
+        alert('Ошибка сохранения: ' + e.message);
+    }
 }
+
+
 function renderAccessUsers() {
     const el=document.getElementById('access-users-list'); if(!el)return;
     const vals=Object.values(appUsers);
@@ -823,15 +982,27 @@ function renderAccessUsers() {
 }
 
 async function adminEditClient(id) {
-    const c=getClientById(id); if(!c)return;
-    const name=prompt('ФИО клиента:',c.name||''); if(name===null)return;
-    const phone=prompt('Телефон:',c.phone||''); if(phone===null)return;
-    const payDate=prompt('Дата оплаты YYYY-MM-DD:',c.payDate||''); if(payDate===null)return;
-    c.name=name.trim(); c.phone=phone.trim(); c.payDate=payDate.trim();
-    save('clients',clients);
-    if(useFirestore) await fsSet('clients',String(c.id),c);
+    const c = getClientById(id);
+    if (!c) return;
+    const name = prompt('ФИО клиента:', c.name || '');
+    if (name === null) return;
+    const phone = prompt('Телефон:', c.phone || '');
+    if (phone === null) return;
+    const birthDate = prompt('Дата рождения YYYY-MM-DD:', c.birthDate || '');
+    if (birthDate === null) return;
+    const payDate = prompt('Дата оплаты YYYY-MM-DD:', c.payDate || '');
+    if (payDate === null) return;
+    c.name = name.trim();
+    c.phone = phone.trim();
+    c.birthDate = birthDate.trim();
+    c.payDate = payDate.trim();
+    c.profileUpdatedAt = new Date().toISOString();
+    save('clients', clients);
+    if (useFirestore) await fsSet('clients', String(c.id), c);
+    logAction('Изменение клиента', c.name);
     renderClientsTable();
 }
+
 async function adminDeleteClient(id) {
     const c=getClientById(id); if(!c)return;
     if(!confirm(`Удалить клиента «${c.name}»? Его задания тоже будут удалены.`))return;
@@ -840,6 +1011,7 @@ async function adminDeleteClient(id) {
     assignments=assignments.filter(a=>String(a.clientId)!==String(id));
     save('clients',clients); saveTuran('assignments',assignments);
     if(useFirestore){ await fsDelete('clients',id); for(const a of deletedAssignments) await fsDelete('assignments',a.id); }
+    logAction('Удаление клиента', c.name);
     renderClientsTable();
 }
 
@@ -902,7 +1074,7 @@ function tplClients() {
             </div>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>ФИО</th><th>Телефон</th><th>Дата оплаты</th><th>QR</th><th>Статус</th>${currentUser?.role==='admin'?'<th class="no-print">Действия</th>':''}</tr></thead>
+                    <thead><tr><th>ФИО</th><th>Телефон</th><th>Дата рождения</th><th>Пол</th><th>Вес</th><th>Цель</th><th>Дата оплаты</th><th>QR</th><th>Статус</th>${currentUser?.role==='admin'?'<th class="no-print">Действия</th>':''}</tr></thead>
                     <tbody id="clients-tbody"></tbody>
                 </table>
             </div>
@@ -1100,8 +1272,20 @@ function tplMyQr() {
 function tplOnboarding() {
     return `
         <div class="page-title">Добро пожаловать</div>
-        <div class="page-desc">Первый вход: подтвердите пол, вес и цель. Без этого кабинет недоступен.</div>
-        <div class="card" style="max-width:440px;">
+        <div class="page-desc">Первый вход: заполните основные данные. После сохранения информация будет доступна администратору.</div>
+        <div class="card" style="max-width:520px;">
+            <div class="form-group">
+                <label>ФИО</label>
+                <input type="text" id="ob-name" class="form-control" placeholder="Фамилия Имя Отчество">
+            </div>
+            <div class="form-group">
+                <label>Телефон</label>
+                <input type="tel" id="ob-phone" class="form-control" placeholder="+7 700 000 00 00">
+            </div>
+            <div class="form-group">
+                <label>Дата рождения</label>
+                <input type="date" id="ob-birthDate" class="form-control">
+            </div>
             <div class="form-group">
                 <label>Пол</label>
                 <select id="ob-gender" class="form-control">
@@ -1119,71 +1303,72 @@ function tplOnboarding() {
                 <label>Цель</label>
                 <select id="ob-goal" class="form-control">
                     <option value="">— выберите —</option>
-                    <option value="lose">Худеть / снизить вес</option>
-                    <option value="gain">Набрать массу / «толстеть» (мышцы)</option>
-                    <option value="shape">Поддержать / улучшить фигуру</option>
+                    <option value="lose">Снизить вес</option>
+                    <option value="gain">Набрать мышечную массу</option>
+                    <option value="shape">Поддерживать / улучшить форму</option>
                     <option value="endurance">Выносливость и здоровье</option>
                     <option value="strength">Сила и силовые показатели</option>
                 </select>
             </div>
             <div class="form-group">
                 <label>Комментарий (необязательно)</label>
-                <input type="text" id="ob-note" class="form-control" placeholder="Например: к лету −5 кг">
+                <input type="text" id="ob-note" class="form-control" placeholder="Дополнительная информация">
             </div>
-            <button class="btn btn-primary btn-block" onclick="saveClientOnboarding()">Подтвердить и продолжить</button>
+            <button class="btn btn-primary btn-block" onclick="saveClientOnboarding()">Сохранить данные и продолжить</button>
         </div>`;
 }
+
 
 function tplProfile() {
     const p = clientProfiles[String(currentUser.clientId)] || {};
-    const goalLabels = {
-        lose: 'Худеть / снизить вес',
-        gain: 'Набрать массу',
-        shape: 'Фигура / поддержание формы',
-        endurance: 'Выносливость',
-        strength: 'Сила'
-    };
-    const genderLabels = { male: 'Мужской', female: 'Женский', other: 'Другое' };
+    const c = getClientById(currentUser.clientId) || {};
     return `
         <div class="page-title">Профиль и цели</div>
-        <div class="page-desc">Пол, вес и желание (цель тренировок)</div>
-        <div class="card" style="max-width:440px;">
-            <div style="margin-bottom:14px; padding:12px; background:var(--bg); border-radius:10px; border:1px solid var(--border);">
-                <div style="font-size:0.85rem;color:var(--text-muted);">Сейчас</div>
-                <div><b>${genderLabels[p.gender] || '—'}</b> · ${p.weight ? p.weight + ' кг' : '—'} · ${goalLabels[p.goal] || '—'}</div>
-                ${p.note ? '<div style="margin-top:6px;font-size:0.9rem;color:var(--text-muted);">' + p.note + '</div>' : ''}
-            </div>
+        <div class="page-desc">Ваши данные можно изменить в любое время.</div>
+        <div class="card" style="max-width:520px;">
+            <div class="form-group"><label>ФИО</label><input type="text" id="pf-name" class="form-control" value="${esc(c.name || currentUser.name || '')}"></div>
+            <div class="form-group"><label>Телефон</label><input type="tel" id="pf-phone" class="form-control" value="${esc(c.phone || '')}"></div>
+            <div class="form-group"><label>Дата рождения</label><input type="date" id="pf-birthDate" class="form-control" value="${esc(c.birthDate || p.birthDate || '')}"></div>
             <div class="form-group">
                 <label>Пол</label>
                 <select id="pf-gender" class="form-control">
-                    <option value="male">Мужской</option>
-                    <option value="female">Женский</option>
-                    <option value="other">Другое</option>
+                    <option value="">— выберите —</option>
+                    <option value="male" ${p.gender==='male'||c.gender==='male'?'selected':''}>Мужской</option>
+                    <option value="female" ${p.gender==='female'||c.gender==='female'?'selected':''}>Женский</option>
+                    <option value="other" ${p.gender==='other'||c.gender==='other'?'selected':''}>Другое</option>
                 </select>
             </div>
-            <div class="form-group">
-                <label>Вес (кг)</label>
-                <input type="number" id="pf-weight" class="form-control" step="0.1" min="30" max="250">
-            </div>
+            <div class="form-group"><label>Вес (кг)</label><input type="number" id="pf-weight" class="form-control" step="0.1" min="30" max="250" value="${esc(p.weight || c.weight || '')}"></div>
             <div class="form-group">
                 <label>Цель</label>
                 <select id="pf-goal" class="form-control">
-                    <option value="lose">Худеть / снизить вес</option>
-                    <option value="gain">Набрать массу / «толстеть» (мышцы)</option>
-                    <option value="shape">Поддержать / улучшить фигуру</option>
-                    <option value="endurance">Выносливость и здоровье</option>
-                    <option value="strength">Сила и силовые показатели</option>
+                    <option value="">— выберите —</option>
+                    <option value="lose" ${p.goal==='lose'||c.goal==='lose'?'selected':''}>Снизить вес</option>
+                    <option value="gain" ${p.goal==='gain'||c.goal==='gain'?'selected':''}>Набрать мышечную массу</option>
+                    <option value="shape" ${p.goal==='shape'||c.goal==='shape'?'selected':''}>Поддерживать / улучшить форму</option>
+                    <option value="endurance" ${p.goal==='endurance'||c.goal==='endurance'?'selected':''}>Выносливость и здоровье</option>
+                    <option value="strength" ${p.goal==='strength'||c.goal==='strength'?'selected':''}>Сила и силовые показатели</option>
                 </select>
             </div>
-            <div class="form-group">
-                <label>Комментарий</label>
-                <input type="text" id="pf-note" class="form-control" placeholder="Кратко о цели">
-            </div>
-            <button class="btn btn-primary btn-block" onclick="saveClientProfile()">Сохранить</button>
+            <div class="form-group"><label>Комментарий</label><input type="text" id="pf-note" class="form-control" value="${esc(p.note || c.note || '')}"></div>
+            <button class="btn btn-primary btn-block" onclick="saveClientProfile()">Сохранить изменения</button>
         </div>`;
 }
 
-function fillOnboardingForm() { /* empty defaults */ }
+
+function fillOnboardingForm() {
+    const c = getClientById(currentUser?.clientId) || {};
+    const p = clientProfiles[String(currentUser?.clientId)] || {};
+    const set = (id, value) => { const el = document.getElementById(id); if (el && value != null) el.value = value; };
+    set('ob-name', c.name || currentUser?.name || '');
+    set('ob-phone', c.phone || '');
+    set('ob-birthDate', c.birthDate || '');
+    set('ob-gender', p.gender || c.gender || '');
+    set('ob-weight', p.weight || c.weight || '');
+    set('ob-goal', p.goal || c.goal || '');
+    set('ob-note', p.note || c.note || '');
+}
+
 
 function fillProfileForm() {
     const p = clientProfiles[String(currentUser.clientId)] || {};
@@ -1197,42 +1382,101 @@ function fillProfileForm() {
     if (note && p.note) note.value = p.note;
 }
 
-function saveClientOnboarding() {
+async function saveClientOnboarding() {
+    const name = (document.getElementById('ob-name')?.value || '').trim();
+    const phone = (document.getElementById('ob-phone')?.value || '').trim();
+    const birthDate = document.getElementById('ob-birthDate')?.value || '';
     const gender = document.getElementById('ob-gender')?.value;
     const weight = parseFloat(document.getElementById('ob-weight')?.value);
     const goal = document.getElementById('ob-goal')?.value;
     const note = (document.getElementById('ob-note')?.value || '').trim();
-    if (!gender || !goal || isNaN(weight) || weight < 30) {
-        alert('Укажите пол, вес и цель');
+
+    if (!name || !gender || !phone || isNaN(weight) || weight < 30 || !goal) {
+        alert('Заполните ФИО, телефон, пол, вес и цель.');
         return;
     }
+
     const cid = String(currentUser.clientId);
-    clientProfiles[cid] = { gender, weight, goal, note, updatedAt: new Date().toISOString() };
+    const c = getClientById(cid);
+    if (!c) return alert('Карточка клиента не найдена.');
+
+    c.name = name;
+    c.phone = phone;
+    c.birthDate = birthDate;
+    c.gender = gender;
+    c.weight = weight;
+    c.goal = goal;
+    c.note = note;
+    c.profileCompleted = true;
+    c.profileUpdatedAt = new Date().toISOString();
+
+    clientProfiles[cid] = {
+        ...(clientProfiles[cid] || {}),
+        name, phone, birthDate, gender, weight, goal, note,
+        updatedAt: new Date().toISOString()
+    };
+
+    save('clients', clients);
     save('profiles', clientProfiles);
-    // sync weight into metrics start point if needed
+    if (useFirestore) {
+        await fsSet('clients', cid, c);
+        // profiles остаётся в gym_data и синхронизируется через save().
+    }
+
+    currentUser.clientName = name;
+    document.getElementById('user-name-display').textContent = name;
+
     if (memberMetrics.weights.length) {
         memberMetrics.weights[memberMetrics.weights.length - 1] = weight;
         save('metrics', memberMetrics);
     }
-    alert('Профиль подтверждён. Добро пожаловать!');
+
+    alert('Данные сохранены. Администратор увидит их в карточке клиента.');
     showPage('subscription');
 }
 
-function saveClientProfile() {
+
+async function saveClientProfile() {
+    const name = (document.getElementById('pf-name')?.value || '').trim();
+    const phone = (document.getElementById('pf-phone')?.value || '').trim();
+    const birthDate = document.getElementById('pf-birthDate')?.value || '';
     const gender = document.getElementById('pf-gender')?.value;
     const weight = parseFloat(document.getElementById('pf-weight')?.value);
     const goal = document.getElementById('pf-goal')?.value;
     const note = (document.getElementById('pf-note')?.value || '').trim();
-    if (!gender || !goal || isNaN(weight) || weight < 30) {
-        alert('Укажите пол, вес и цель');
+
+    if (!name || !gender || !phone || isNaN(weight) || weight < 30 || !goal) {
+        alert('Заполните ФИО, телефон, пол, вес и цель.');
         return;
     }
+
     const cid = String(currentUser.clientId);
-    clientProfiles[cid] = { gender, weight, goal, note, updatedAt: new Date().toISOString() };
+    const c = getClientById(cid);
+    if (!c) return alert('Карточка клиента не найдена.');
+
+    Object.assign(c, {
+        name, phone, birthDate, gender, weight, goal, note,
+        profileCompleted: true,
+        profileUpdatedAt: new Date().toISOString()
+    });
+
+    clientProfiles[cid] = {
+        ...(clientProfiles[cid] || {}),
+        name, phone, birthDate, gender, weight, goal, note,
+        updatedAt: new Date().toISOString()
+    };
+
+    save('clients', clients);
     save('profiles', clientProfiles);
+    if (useFirestore) await fsSet('clients', cid, c);
+
+    currentUser.clientName = name;
+    currentUser.name = name;
+    document.getElementById('user-name-display').textContent = name;
     alert('Профиль сохранён');
     showPage('profile');
 }
+
 
 function processQrScan() {
     const code = (document.getElementById('qr-input')?.value || '').trim().toUpperCase();
@@ -1347,8 +1591,10 @@ function renderClientsTable() {
     tbody.innerHTML = slice.length ? slice.map(c => {
         const overdue = new Date(c.payDate) < today;
         const st = overdue ? '<span class="tag tag-danger">Просрочено</span>' : '<span class="tag tag-ok">Ожидается</span>';
-        return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.phone)}</td><td>${esc(c.payDate)}</td><td><code style="font-size:0.75rem">${esc(c.qrCode||'')}</code></td><td>${st}</td>${currentUser?.role==='admin'?`<td class="no-print"><button class="btn btn-outline btn-sm" onclick="adminEditClient('${esc(c.id)}')">Изменить</button> <button class="btn btn-danger btn-sm" onclick="adminDeleteClient('${esc(c.id)}')">Удалить</button></td>`:''}</tr>`;
-    }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Нет данных</td></tr>';
+        const genderLabels = {male:'Мужской', female:'Женский', other:'Другое'};
+        const goalLabels = {lose:'Снизить вес', gain:'Набрать массу', shape:'Форма', endurance:'Выносливость', strength:'Сила'};
+        return `<tr><td><b>${esc(c.name)}</b><div style="font-size:.72rem;color:var(--text-muted)">${esc(c.email||'')}</div></td><td>${esc(c.phone||'')}</td><td>${esc(c.birthDate||'—')}</td><td>${esc(genderLabels[c.gender]||'—')}</td><td>${c.weight?esc(c.weight)+' кг':'—'}</td><td>${esc(goalLabels[c.goal]||'—')}${c.note?`<div style="font-size:.72rem;color:var(--text-muted)">${esc(c.note)}</div>`:''}</td><td>${esc(c.payDate||'—')}</td><td><code style="font-size:0.75rem">${esc(c.qrCode||'')}</code></td><td>${st}</td>${currentUser?.role==='admin'?`<td class="no-print"><button class="btn btn-outline btn-sm" onclick="adminEditClient('${esc(c.id)}')">Изменить</button> <button class="btn btn-danger btn-sm" onclick="adminDeleteClient('${esc(c.id)}')">Удалить</button></td>`:''}</tr>`;
+    }).join('') : '<tr><td colspan="10" style="text-align:center;color:var(--text-muted)">Нет данных</td></tr>';
     renderPagination('clients-pagination', total, pages.clients, p => { pages.clients = p; renderClientsTable(); });
 }
 
@@ -1663,27 +1909,153 @@ function doPrint(title) {
 
 if (auth) {
     auth.onAuthStateChanged(async user => {
-        if (!user) return;
-        // Popup flow handles session; this keeps refreshes signed in.
+        if (roleUnsubscribe) {
+            try { roleUnsubscribe(); } catch (_) {}
+            roleUnsubscribe = null;
+        }
+
+        if (!user) {
+            currentUser = null;
+            document.getElementById('auth-screen').style.display = 'flex';
+            document.getElementById('app-shell').style.display = 'none';
+            return;
+        }
+
         try {
-            await loadFromFirestore(); await loadTuranCollections();
-            const email=(user.email||'').toLowerCase();
-            let role='member', ud={};
-            const snap=await db.collection('users').doc(user.uid).get();
-            if(snap.exists) ud=snap.data()||{};
-            const em=await db.collection('usersByEmail').doc(email).get();
-            if(em.exists && em.data().role) role=em.data().role;
-            if(ud.role) role=ud.role;
-            if(TURAN_CONFIG.adminEmails.map(x=>String(x).toLowerCase()).includes(email)) role='admin';
-            let clientId=ud.clientId||null;
-            if(role==='member') {
-                const c=clients.find(x=>x.uid===user.uid || (x.email||'').toLowerCase()===email);
-                if(c) clientId=c.id;
-            }
-            if(!currentUser) setUserSession({name:user.displayName||email,email,uid:user.uid,role,clientId});
-        } catch(e){ console.warn('Session restore',e); }
+            await syncGoogleUser(user, true);
+            await loadProData();
+
+            // Живое обновление роли. Администратор меняет роль —
+            // текущий пользователь сразу получает новый интерфейс.
+            roleUnsubscribe = db.collection('users').doc(user.uid).onSnapshot(async snap => {
+                if (!snap.exists || !currentUser || currentUser.uid !== user.uid) return;
+
+                const data = snap.data() || {};
+                const email = (user.email || '').toLowerCase();
+                let newRole = data.role || 'member';
+
+                if (!TURAN_CONFIG.adminEmails.map(x => String(x).toLowerCase()).includes(email)) {
+                    try {
+                        const eDoc = await db.collection('usersByEmail').doc(email).get();
+                        if (eDoc.exists && eDoc.data().role) newRole = eDoc.data().role;
+                    } catch (_) {}
+                } else {
+                    newRole = 'admin';
+                }
+
+                const oldRole = currentUser.role;
+                if (oldRole === newRole && String(currentUser.clientId || '') === String(data.clientId || '')) return;
+
+                const client = await ensureGoogleClient(user);
+                currentUser.role = newRole;
+                currentUser.clientId = data.clientId || (client && client.id) || currentUser.clientId || null;
+
+                document.getElementById('user-role-display').textContent = roleLabel(newRole);
+                buildSidebar();
+
+                if (newRole === 'member' && currentUser.clientId && !isClientProfileComplete(currentUser.clientId)) {
+                    showPage('onboarding');
+                } else if (NAV[newRole]) {
+                    showPage(NAV[newRole][0].items[0].id);
+                }
+
+                // Если пользователь стал админом/ресепшеном, подтягиваем общие данные.
+                if (newRole === 'admin' || newRole === 'reception') {
+                    await loadFromFirestore();
+                    await loadTuranCollections();
+                }
+            });
+        } catch (e) {
+            console.warn('Session restore', e);
+        }
     });
 }
+
+
+/* ============================================================
+   GYM PRO — абонементы, посещения, Dashboard, журнал и Excel
+   Дополнение: существующая структура приложения сохранена.
+   ============================================================ */
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+function uid(prefix){ return prefix + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,8); }
+function getSubscription(cid){
+    return subscriptions.find(x => String(x.clientId) === String(cid) && x.status !== 'cancelled') || null;
+}
+function subscriptionStatus(s){
+    if(!s) return ['Нет абонемента','tag-danger'];
+    const now=new Date(); const end=new Date(s.endDate+'T23:59:59');
+    const days=Math.ceil((end-now)/86400000);
+    if(days<0) return ['Истёк','tag-danger'];
+    if(days<=7) return ['Заканчивается','tag-warn'];
+    return ['Активен','tag-ok'];
+}
+function logAction(action, details){
+    const item={id:uid('log'), action, details:details||'', byUid:currentUser?.uid||'', byName:currentUser?.name||'', dateTime:new Date().toISOString()};
+    auditLog.unshift(item); auditLog=auditLog.slice(0,1000); save('audit',auditLog); return item;
+}
+
+function tplDashboard(){
+ return `<div class="page-title">Dashboard</div><div class="page-desc">Оперативная информация по клубу</div>
+ <div class="stat-grid" id="dashboard-stats"></div>
+ <div class="grid grid-2"><div class="card"><div class="card-title">Ближайшие окончания</div><div id="dashboard-expiring"></div></div>
+ <div class="card"><div class="card-title">Последние посещения</div><div id="dashboard-visits"></div></div></div>`;
+}
+function renderDashboard(){
+ const el=document.getElementById('dashboard-stats'); if(!el)return;
+ const active=clients.filter(c=>{const s=getSubscription(c.id); return s&&subscriptionStatus(s)[0]!=='Истёк';}).length;
+ const today=visits.filter(v=>v.date===todayISO()).length;
+ const exp=clients.filter(c=>{const s=getSubscription(c.id); return s&&subscriptionStatus(s)[0]==='Заканчивается';}).length;
+ const incomplete=clients.filter(c=>!isClientProfileComplete(c.id)).length;
+ el.innerHTML=`<div class="stat-card"><div class="stat-value">${clients.length}</div><div class="stat-label">Всего клиентов</div></div><div class="stat-card"><div class="stat-value">${active}</div><div class="stat-label">Активных абонементов</div></div><div class="stat-card"><div class="stat-value">${today}</div><div class="stat-label">Посещений сегодня</div></div><div class="stat-card"><div class="stat-value">${exp}</div><div class="stat-label">Заканчиваются ≤ 7 дней</div></div><div class="stat-card"><div class="stat-value">${incomplete}</div><div class="stat-label">Незаполненных профилей</div></div>`;
+ const e=document.getElementById('dashboard-expiring'); const arr=clients.map(c=>({c,s:getSubscription(c.id)})).filter(x=>x.s&&subscriptionStatus(x.s)[0]==='Заканчивается').sort((a,b)=>a.s.endDate.localeCompare(b.s.endDate)).slice(0,8);
+ e.innerHTML=arr.length?arr.map(x=>`<div style="padding:9px 0;border-bottom:1px solid var(--border)"><b>${esc(x.c.name)}</b><br><span style="color:var(--text-muted)">${esc(x.s.tariff||'Абонемент')} · до ${esc(x.s.endDate)}</span></div>`).join(''):'<span style="color:var(--text-muted)">Скорого окончания нет.</span>';
+ const v=document.getElementById('dashboard-visits'); const vv=visits.slice().sort((a,b)=>String(b.dateTime).localeCompare(String(a.dateTime))).slice(0,8);
+ v.innerHTML=vv.length?vv.map(x=>{const c=getClientById(x.clientId);return `<div style="padding:9px 0;border-bottom:1px solid var(--border)"><b>${esc(c?.name||x.clientName||'Клиент')}</b><br><span style="color:var(--text-muted)">${esc(x.date)} · ${new Date(x.dateTime||x.date).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}</span></div>`}).join(''):'<span style="color:var(--text-muted)">Посещений пока нет.</span>';
+}
+
+function tplSubscriptions(){
+ return `<div class="page-title">Абонементы</div><div class="page-desc">Управление сроком действия и остатком посещений</div>
+ <div class="card"><div class="toolbar no-print"><div class="search-box"><span class="search-icon">⌕</span><input id="sub-search" class="form-control" placeholder="Поиск клиента..." oninput="renderSubscriptions()"></div><button class="btn btn-outline btn-sm" onclick="downloadSubscriptionsExcel()">Excel</button></div>
+ <div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Тариф</th><th>Начало</th><th>Окончание</th><th>Посещения</th><th>Статус</th><th>Действие</th></tr></thead><tbody id="sub-tbody"></tbody></table></div><div class="pagination" id="sub-pagination"></div></div>
+ <div class="card"><div class="card-title">Новый / продление абонемента</div><div class="grid grid-2"><div class="form-group"><label>Клиент</label><select id="sub-client" class="form-control">${clients.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select></div><div class="form-group"><label>Тариф</label><input id="sub-tariff" class="form-control" placeholder="Месячный"></div><div class="form-group"><label>Дата начала</label><input id="sub-start" type="date" value="${todayISO()}" class="form-control"></div><div class="form-group"><label>Дата окончания</label><input id="sub-end" type="date" class="form-control"></div><div class="form-group"><label>Лимит посещений (0 = безлимит)</label><input id="sub-limit" type="number" min="0" value="0" class="form-control"></div><div class="form-group"><label>Стоимость, ₸</label><input id="sub-price" type="number" min="0" value="0" class="form-control"></div></div><button class="btn btn-primary" onclick="saveSubscription()">Сохранить абонемент</button></div>`;
+}
+function renderSubscriptions(){
+ const body=document.getElementById('sub-tbody'); if(!body)return; const q=(document.getElementById('sub-search')?.value||'').toLowerCase();
+ let arr=clients.map(c=>({c,s:getSubscription(c.id)})).filter(x=>(x.c.name||'').toLowerCase().includes(q)||(x.c.phone||'').includes(q)); const total=arr.length,totalPages=Math.max(1,Math.ceil(total/PAGE_SIZE)); pages.subscriptions=pages.subscriptions||1; if(pages.subscriptions>totalPages)pages.subscriptions=totalPages; arr=arr.slice((pages.subscriptions-1)*PAGE_SIZE,pages.subscriptions*PAGE_SIZE);
+ body.innerHTML=arr.map(x=>{const st=subscriptionStatus(x.s);return `<tr><td><b>${esc(x.c.name)}</b><div style="font-size:.72rem;color:var(--text-muted)">${esc(x.c.phone||'')}</div></td><td>${esc(x.s?.tariff||'—')}</td><td>${esc(x.s?.startDate||'—')}</td><td>${esc(x.s?.endDate||'—')}</td><td>${x.s?.unlimited?'Безлимит':`${x.s?.remaining??0} / ${x.s?.visitLimit??0}`}</td><td><span class="tag ${st[1]}">${st[0]}</span></td><td><button class="btn btn-outline btn-sm" onclick="quickExtendSubscription('${esc(x.c.id)}')">Продлить</button></td></tr>`}).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Нет клиентов</td></tr>';
+ renderPagination('sub-pagination',total,pages.subscriptions,p=>{pages.subscriptions=p;renderSubscriptions();});
+}
+function quickExtendSubscription(cid){document.getElementById('sub-client').value=cid;document.getElementById('sub-end').focus();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});}
+async function saveSubscription(){
+ const cid=document.getElementById('sub-client')?.value, c=getClientById(cid), start=document.getElementById('sub-start')?.value, end=document.getElementById('sub-end')?.value; if(!c||!start||!end||end<start)return alert('Укажите клиента и корректные даты.');
+ const limit=parseInt(document.getElementById('sub-limit')?.value||0,10)||0; const item={id:uid('sub'),clientId:cid,clientUid:c.uid||'',tariff:document.getElementById('sub-tariff')?.value.trim()||'Абонемент',startDate:start,endDate:end,visitLimit:limit,remaining:limit,unlimited:limit===0,price:parseFloat(document.getElementById('sub-price')?.value||0)||0,status:'active',createdAt:new Date().toISOString(),createdBy:currentUser?.uid||''};
+ subscriptions=subscriptions.filter(x=>String(x.clientId)!==String(cid)||x.status==='cancelled'); subscriptions.unshift(item); save('subscriptions',subscriptions); await fsSet('gym_data','subscriptions',{data:subscriptions}); logAction('Создан абонемент',`${c.name} — ${item.tariff} до ${item.endDate}`); alert('Абонемент сохранён.'); renderSubscriptions();
+}
+
+function tplVisits(){return `<div class="page-title">Посещения</div><div class="page-desc">Регистрация входа клиента и история посещений</div><div class="card"><div class="toolbar"><div class="search-box"><span class="search-icon">⌕</span><input id="visit-search" class="form-control" placeholder="ФИО или телефон..." oninput="renderVisits()"></div><button class="btn btn-primary" onclick="registerVisitPrompt()">+ Отметить посещение</button><button class="btn btn-outline" onclick="downloadVisitsExcel()">Excel</button></div><div class="table-wrap"><table><thead><tr><th>Дата</th><th>Время</th><th>Клиент</th><th>Абонемент</th><th>Остаток</th></tr></thead><tbody id="visits-tbody"></tbody></table></div><div class="pagination" id="visits-pagination"></div></div>`;}
+function renderVisits(memberOnly=false){const body=document.getElementById('visits-tbody');if(!body)return;const q=(document.getElementById('visit-search')?.value||'').toLowerCase();let arr=visits.slice().sort((a,b)=>String(b.dateTime).localeCompare(String(a.dateTime)));if(memberOnly)arr=arr.filter(v=>String(v.clientUid)===String(currentUser?.uid)||String(v.clientId)===String(currentUser?.clientId));arr=arr.filter(v=>{const c=getClientById(v.clientId);return !q||(c?.name||v.clientName||'').toLowerCase().includes(q)||(c?.phone||'').includes(q)});const total=arr.length;pages.visits=pages.visits||1;const tp=Math.max(1,Math.ceil(total/PAGE_SIZE));if(pages.visits>tp)pages.visits=tp;const slice=arr.slice((pages.visits-1)*PAGE_SIZE,pages.visits*PAGE_SIZE);body.innerHTML=slice.map(v=>{const c=getClientById(v.clientId),s=getSubscription(v.clientId);return `<tr><td>${esc(v.date)}</td><td>${esc(new Date(v.dateTime||v.date).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}))}</td><td><b>${esc(c?.name||v.clientName||'—')}</b></td><td>${esc(s?.tariff||'—')}</td><td>${s?.unlimited?'∞':(s?.remaining??'—')}</td></tr>`}).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Нет посещений</td></tr>';renderPagination('visits-pagination',total,pages.visits,p=>{pages.visits=p;renderVisits(memberOnly);});}
+async function registerVisitPrompt(){
+ if(currentUser?.role==='member')return; const q=prompt('Введите ФИО или телефон клиента:');if(!q)return;const lc=q.toLowerCase();const c=clients.find(x=>(x.name||'').toLowerCase().includes(lc)||(x.phone||'').includes(q));if(!c)return alert('Клиент не найден.');const s=getSubscription(c.id);if(!s)return alert('У клиента нет действующего абонемента.');const st=subscriptionStatus(s);if(st[0]==='Истёк')return alert('Абонемент истёк.');if(!s.unlimited&&Number(s.remaining)<=0)return alert('Посещения закончились.');
+ const v={id:uid('visit'),clientId:c.id,clientUid:c.uid||'',clientName:c.name,date:todayISO(),dateTime:new Date().toISOString(),createdBy:currentUser?.uid||''};visits.unshift(v);if(!s.unlimited)s.remaining=Math.max(0,Number(s.remaining)-1);c.lastVisit=v.date;save('visits',visits);save('subscriptions',subscriptions);save('clients',clients);await fsSet('gym_data','visits',{data:visits});await fsSet('gym_data','subscriptions',{data:subscriptions});await fsSet('clients',String(c.id),c);logAction('Посещение',`${c.name} — ${v.dateTime}`);alert(`Посещение отмечено: ${c.name}`);renderVisits();}
+
+function tplAudit(){return `<div class="page-title">Журнал действий</div><div class="page-desc">Последние действия сотрудников и системы</div><div class="card"><div class="table-wrap"><table><thead><tr><th>Дата</th><th>Пользователь</th><th>Действие</th><th>Подробности</th></tr></thead><tbody id="audit-tbody"></tbody></table></div><div class="pagination" id="audit-pagination"></div></div>`;}
+function renderAudit(){const b=document.getElementById('audit-tbody');if(!b)return;const total=auditLog.length;pages.audit=pages.audit||1;const tp=Math.max(1,Math.ceil(total/PAGE_SIZE));if(pages.audit>tp)pages.audit=tp;const a=auditLog.slice((pages.audit-1)*PAGE_SIZE,pages.audit*PAGE_SIZE);b.innerHTML=a.map(x=>`<tr><td>${esc(new Date(x.dateTime).toLocaleString('ru-RU'))}</td><td>${esc(x.byName||x.byUid||'Система')}</td><td>${esc(x.action)}</td><td>${esc(x.details)}</td></tr>`).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Журнал пуст</td></tr>';renderPagination('audit-pagination',total,pages.audit,p=>{pages.audit=p;renderAudit();});}
+
+function tplMyVisits(){return `<div class="page-title">Мои посещения</div><div class="page-desc">История посещений вашего аккаунта</div><div class="card"><div class="table-wrap"><table><thead><tr><th>Дата</th><th>Время</th><th>Абонемент</th><th>Остаток</th></tr></thead><tbody id="visits-tbody"></tbody></table></div><div class="pagination" id="visits-pagination"></div></div>`;}
+
+function downloadSubscriptionsExcel(){const rows=[['Клиент','Телефон','Тариф','Начало','Окончание','Остаток','Статус'],...clients.map(c=>{const s=getSubscription(c.id),st=subscriptionStatus(s)[0];return[c.name,c.phone||'',s?.tariff||'',s?.startDate||'',s?.endDate||'',s?.unlimited?'Безлимит':s?.remaining??'',st]})];const ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Абонементы');XLSX.writeFile(wb,'gym_subscriptions.xlsx');}
+function downloadVisitsExcel(){const rows=[['Дата','Время','Клиент','Телефон','Тариф'],...visits.map(v=>{const c=getClientById(v.clientId),s=getSubscription(v.clientId);return[v.date,new Date(v.dateTime||v.date).toLocaleTimeString('ru-RU'),c?.name||v.clientName||'',c?.phone||'',s?.tariff||'']})];const ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Посещения');XLSX.writeFile(wb,'gym_visits.xlsx');}
+
+// Дополнительные страницы доступны без изменения старых разделов.
+NAV.reception[0].items.splice(1,0,{id:'subscriptions',label:'Абонементы',icon:'◈'},{id:'visits',label:'Посещения',icon:'✓'});
+NAV.member[0].items.splice(1,0,{id:'my-visits',label:'Мои посещения',icon:'✓'});
+
+// Загружаем новые коллекции из Firestore при восстановлении сессии.
+async function loadProData(){
+ if(!useFirestore||!db)return;
+ for(const key of ['subscriptions','visits','audit']){try{const snap=await db.collection('gym_data').doc(key).get();if(snap.exists&&snap.data().data){if(key==='subscriptions')subscriptions=snap.data().data;if(key==='visits')visits=snap.data().data;if(key==='audit')auditLog=snap.data().data;localStorage.setItem(STORE_KEYS[key],JSON.stringify(snap.data().data));}}catch(e){console.warn('Load '+key,e);}}
+}
+
 </script>
 </body>
 </html>
