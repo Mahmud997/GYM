@@ -1,7 +1,4 @@
 // TURAN Firebase configuration
-// 1) Create a Firebase Web App in Firebase Console.
-// 2) Copy its config here.
-// 3) Add the Google accounts that should start as admin to adminEmails.
 window.TURAN_FIREBASE_CONFIG = {
   apiKey: "AIzaSyBArSUIbrJa5Ht8sAVLPSEqf0kOEwMvFu8",
   authDomain: "gym-6ff42.firebaseapp.com",

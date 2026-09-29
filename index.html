@@ -607,8 +607,12 @@ async function fsDelete(collection, id) {
 }
 async function loadTuranCollections() {
     if (!useFirestore || !db) return;
+    const isMember = currentUser && currentUser.role === 'member';
     try {
-        const clientSnap = await db.collection('clients').get();
+        const clientRef = db.collection('clients');
+        const clientSnap = isMember && auth.currentUser
+            ? await clientRef.where('uid', '==', auth.currentUser.uid).get()
+            : await clientRef.get();
         if (!clientSnap.empty) {
             const remoteClients = clientSnap.docs.map(d => ({id:d.id, ...d.data()}));
             const byId = new Map(clients.map(c => [String(c.id), c]));
@@ -617,13 +621,27 @@ async function loadTuranCollections() {
             localStorage.setItem(STORE_KEYS.clients, JSON.stringify(clients));
         }
     } catch(e) { console.warn('Load clients collection', e); }
+
     const collections = [
-        ['trainers', 'trainers'], ['trainerCategories','trainerCategories'],
-        ['assignments','assignments']
+        ['trainers', 'trainers'],
+        ['trainerCategories', 'trainerCategories']
     ];
+    if (isMember && auth.currentUser) {
+        collections.push(['assignments', 'assignments']);
+    } else {
+        collections.push(['assignments', 'assignments']);
+    }
+
     for (const [collection, key] of collections) {
         try {
-            const snap = await db.collection(collection).get();
+            let snap;
+            if (collection === 'assignments' && isMember && auth.currentUser) {
+                snap = await db.collection('assignments')
+                    .where('clientUid', '==', auth.currentUser.uid)
+                    .get();
+            } else {
+                snap = await db.collection(collection).get();
+            }
             const arr = snap.docs.map(d => ({id:d.id, ...d.data()}));
             if (key === 'trainers') trainers = arr;
             if (key === 'trainerCategories') trainerCategories = arr;
